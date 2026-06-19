@@ -10,7 +10,7 @@ These flags move the crawl along the throughput-versus-politeness axis.
 
 ## Concurrency
 
-`--workers` sets how many fetches run at once, and `--transport-shards` sets how many keep-alive connection pools they spread across (sharding the pool reduces lock contention at high worker counts):
+`--workers` sets the size of the worker pool and the ceiling on concurrent fetches, and `--transport-shards` sets how many keep-alive connection pools they spread across (sharding the pool reduces lock contention at high worker counts):
 
 ```bash
 # Ease off on a laptop
@@ -19,6 +19,23 @@ ami crawl urls.txt --workers 200 --transport-shards 8
 # Push a well-provisioned box
 ami crawl urls.txt --workers 4000 --transport-shards 128
 ```
+
+## Adaptive in-flight limit
+
+The number of requests actually in flight is not fixed at `--workers`.
+A controller floats it between `--min-inflight` and `--workers` based on what the local uplink sustains, the same idea as TCP congestion control: each completed response grows the limit, and a broad burst of timeouts from hosts that had been answering shrinks it.
+
+This matters because a fixed wall of connections oversubscribes a thin uplink, the handshakes congest, requests time out before the first byte, and a naive crawler then blames the hosts and skips them.
+The controller keeps the link out of that collapse, so live hosts are not false-skipped, while a fat pipe with no losses still climbs straight to the `--workers` ceiling.
+On a fast link the controller costs nothing; you only notice it on a link too thin for the worker count you asked for.
+
+```bash
+# Start gentle and let it climb; never drop below 64 in flight
+ami crawl urls.txt --workers 3000 --start-inflight 128 --min-inflight 64
+```
+
+`--start-inflight` is where the controller begins before it has learned the link (default 64), and `--min-inflight` is the floor it will never drop below (default 32).
+A request the engine attributes to local congestion rather than the host is retried up to `--max-retries` times (default 4) with a short backoff, and only counted as a failure if it still cannot get through.
 
 ## Per-host limits
 
@@ -29,7 +46,9 @@ Cap the connections any single host gets, and give up on a host that keeps faili
 ami crawl urls.txt --per-host 4 --domain-fail-threshold 5
 ```
 
-`--per-host` is the ceiling on concurrent connections to one host; `--domain-fail-threshold` is how many consecutive failures a domain may rack up before ami skips the rest of its URLs.
+`--per-host` is the ceiling on concurrent connections to one host; `--domain-fail-threshold` is how many host-attributable failures a domain may rack up before ami skips the rest of its URLs.
+Only failures the host owns count toward that threshold: a refused connection, a reset, an unresolvable name.
+A timeout the engine reads as local congestion does not, and a domain that has answered even once is never skipped, so a slow-but-live host is never given up on by mistake.
 
 ## Timeouts and body size
 

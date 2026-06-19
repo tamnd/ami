@@ -6,6 +6,12 @@ weight: 40
 
 The authoritative, commit-level history lives on the [releases page](https://github.com/tamnd/ami/releases). This page summarises each version.
 
+## Unreleased
+
+- **Adaptive in-flight limit.** The number of requests in flight now floats between `--min-inflight` and `--workers` under a congestion controller, instead of a fixed wall of connections. A thin uplink is no longer oversubscribed into a timeout storm, and a fat pipe still climbs to the worker ceiling.
+- **No more false-skipped live hosts.** The dead-domain breaker now tells our own congestion from a host's silence: only failures the host owns (refused, reset, unresolvable) count toward the skip threshold, congestion-suspected timeouts are retried up to `--max-retries` times, and a domain that has answered even once is never skipped. On a real seed this turned a 66% skip rate into 3% on the same hosts, with no loss of throughput.
+- **New flags.** `--min-inflight`, `--start-inflight`, and `--max-retries` expose the controller; `--workers` is now the pool size and the limit's ceiling.
+
 ## v0.1.0
 
 The first release. ami re-fetches every URL in a seed and packs the results into WARC files and a columnar Parquet index.
