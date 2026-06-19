@@ -10,6 +10,7 @@ import (
 	"crypto/sha1"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"hash/fnv"
 	"io"
 	"net"
@@ -51,6 +52,7 @@ type Fetcher struct {
 	res     *resolver
 	clients []*http.Client
 	timeout *adaptiveTimeout
+	lim     *limiter
 	maxBody int64
 
 	hostSem sync.Map // host -> chan struct{}
@@ -59,6 +61,11 @@ type Fetcher struct {
 
 type domainState struct {
 	fails atomic.Int64
+	// alive is set once a domain has returned any response. A domain that has
+	// answered is never skipped for later timeouts: the breaker exists to stop
+	// wasting workers on hosts that will never answer, not on live-but-slow
+	// ones, so a single success immunizes it for the rest of the run.
+	alive atomic.Bool
 }
 
 // New builds a Fetcher from config.
@@ -68,6 +75,7 @@ func New(cfg config.Config) *Fetcher {
 		cfg:     cfg,
 		res:     res,
 		timeout: newAdaptiveTimeout(cfg.Timeout),
+		lim:     newLimiter(cfg.MinInflight, cfg.StartInflight, cfg.Workers),
 		maxBody: cfg.MaxBodyBytes,
 	}
 	f.clients = make([]*http.Client, cfg.TransportShards)
@@ -143,19 +151,97 @@ func (f *Fetcher) acquireHost(ctx context.Context, host string) (func(), bool) {
 }
 
 // domainDead reports whether a domain has exceeded the failure threshold and
-// should be skipped for the rest of the run.
+// should be skipped for the rest of the run. A domain that has ever answered is
+// never dead: one success immunizes it, so a live-but-slow host is never
+// skipped over a run of transient timeouts.
 func (f *Fetcher) domainDead(domain string) bool {
 	v, ok := f.deadDom.Load(domain)
 	if !ok {
 		return false
 	}
-	return v.(*domainState).fails.Load() >= int64(f.cfg.DomainFailThreshold)
+	st := v.(*domainState)
+	if st.alive.Load() {
+		return false
+	}
+	return st.fails.Load() >= int64(f.cfg.DomainFailThreshold)
 }
 
-// noteDomainFail records a transport failure for a domain.
+// noteDomainFail records a host-attributable failure for a domain.
 func (f *Fetcher) noteDomainFail(domain string) {
 	v, _ := f.deadDom.LoadOrStore(domain, &domainState{})
 	v.(*domainState).fails.Add(1)
+}
+
+// noteDomainOK records that a domain answered, immunizing it from the breaker
+// and clearing any failures it accumulated before it first responded.
+func (f *Fetcher) noteDomainOK(domain string) {
+	v, _ := f.deadDom.LoadOrStore(domain, &domainState{})
+	st := v.(*domainState)
+	if st.alive.CompareAndSwap(false, true) {
+		st.fails.Store(0)
+	}
+}
+
+// Stop releases the engine's blocking limiter so a cancelled run unwinds. It is
+// safe to call once the run context is done.
+func (f *Fetcher) Stop() { f.lim.close() }
+
+// Limit reports the live in-flight concurrency limit, for progress display.
+func (f *Fetcher) Limit() int { return f.lim.currentLimit() }
+
+// attribute decides what a transport error means for the dead-domain breaker.
+// A failure the remote host owns counts toward its death. A transient failure
+// is blamed on our own oversubscription and returned as errRetry while the link
+// is congested, so the run loop retries it; only on a healthy link does a
+// transient failure count, because then a timeout really is the host's fault.
+func (f *Fetcher) attribute(domain string, err error) error {
+	switch classify(err) {
+	case classCanceled:
+		return err
+	case classGenuine:
+		f.noteDomainFail(domain)
+		return err
+	default: // classTransient
+		if f.lim.congested() {
+			return errRetry
+		}
+		f.noteDomainFail(domain)
+		return err
+	}
+}
+
+// failOutcome maps a failed request to a controller outcome. A timeout on a
+// host that has answered before is a congestion loss (the link is the problem);
+// a timeout on a host that never answered, or any non-timeout error, is neutral
+// (a dead host, which must not throttle the limit for the live ones).
+func (f *Fetcher) failOutcome(domain string, err error) outcome {
+	if isTimeoutErr(err) && f.domainAlive(domain) {
+		return outLoss
+	}
+	return outNeutral
+}
+
+// domainAlive reports whether a domain has ever returned a response.
+func (f *Fetcher) domainAlive(domain string) bool {
+	if v, ok := f.deadDom.Load(domain); ok {
+		return v.(*domainState).alive.Load()
+	}
+	return false
+}
+
+// isTimeoutErr reports whether err is a timeout, the loss signal the limiter
+// uses to back off.
+func isTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if ne, ok := errors.AsType[net.Error](err); ok {
+		return ne.Timeout()
+	}
+	return false
 }
 
 // Fetch performs one re-fetch and returns its Result, setting Unchanged when the
@@ -175,19 +261,33 @@ func (f *Fetcher) Fetch(ctx context.Context, s SeedURL) Result {
 		return r
 	}
 
+	// Gate on the adaptive in-flight limit before taking any connection, so a
+	// thin uplink is never asked to open more sockets than it sustains. This is
+	// what keeps the link out of the congestion collapse that would otherwise
+	// time out live hosts and trip the breaker.
+	if !f.lim.acquire(ctx) {
+		r.Err = ctx.Err()
+		if r.Err == nil {
+			r.Err = errSkip
+		}
+		return r
+	}
+
 	release, ok := f.acquireHost(ctx, host)
 	if !ok {
+		f.lim.release(outNeutral)
 		r.Err = ctx.Err()
 		return r
 	}
-	defer release()
 
 	to := f.timeout.value()
 	reqCtx, cancel := context.WithTimeout(ctx, to)
-	defer cancel()
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, s.URL, nil)
 	if err != nil {
+		cancel()
+		release()
+		f.lim.release(outNeutral)
 		r.Err = err
 		return r
 	}
@@ -197,19 +297,29 @@ func (f *Fetcher) Fetch(ctx context.Context, s SeedURL) Result {
 	start := time.Now()
 	resp, err := f.clientFor(host).Do(req)
 	if err != nil {
-		f.noteDomainFail(domain)
-		r.Err = err
+		cancel()
+		release()
+		f.lim.release(f.failOutcome(domain, err))
+		r.Err = f.attribute(domain, err)
 		return r
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, f.maxBody))
-	if err != nil {
-		r.Err = err
+	body, rerr := io.ReadAll(io.LimitReader(resp.Body, f.maxBody))
+	if rerr == nil {
+		_, _ = io.Copy(io.Discard, resp.Body) // drain so the connection can be reused
+	}
+	_ = resp.Body.Close()
+	rtt := time.Since(start)
+	cancel()
+	release()
+	if rerr != nil {
+		f.lim.release(f.failOutcome(domain, rerr))
+		r.Err = f.attribute(domain, rerr)
 		return r
 	}
-	_, _ = io.Copy(io.Discard, resp.Body) // drain so the connection can be reused
-	f.timeout.observe(time.Since(start))
+	f.lim.release(outOK)
+	f.timeout.observe(rtt)
+	f.noteDomainOK(domain)
 
 	sum := sha1.Sum(body)
 	r.Status = resp.StatusCode
