@@ -73,7 +73,7 @@ func Default() Config {
 		DNSWorkers:          2000,
 		TransportShards:     64,
 		Timeout:             5 * time.Second,
-		ProbeTimeout:        1500 * time.Millisecond,
+		ProbeTimeout:        3 * time.Second,
 		DNSTimeout:          2 * time.Second,
 		MaxConnsPerHost:     8,
 		MaxConnsPerIP:       24,

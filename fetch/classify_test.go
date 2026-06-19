@@ -16,13 +16,19 @@ func TestClassify(t *testing.T) {
 	}{
 		{"deadline", context.DeadlineExceeded, classTransient},
 		{"canceled", context.Canceled, classCanceled},
-		{"refused", syscall.ECONNREFUSED, classGenuine},
-		{"reset", syscall.ECONNRESET, classGenuine},
+		// Refused and reset are transient, not genuine: our own concurrency can
+		// make a live host's accept backlog overflow (refused) or its load
+		// balancer reset us, so neither proves the host is dead.
+		{"refused", syscall.ECONNREFUSED, classTransient},
+		{"reset", syscall.ECONNRESET, classTransient},
+		// No route to host or network is a genuine, unmanufacturable verdict.
 		{"unreachable", syscall.EHOSTUNREACH, classGenuine},
+		{"net-unreachable", syscall.ENETUNREACH, classGenuine},
 		{"too-many-files", syscall.EMFILE, classTransient},
 		{"no-ports", syscall.EADDRNOTAVAIL, classTransient},
 		{"nxdomain", &net.DNSError{Err: "no such host", IsNotFound: true}, classGenuine},
 		{"dns-timeout", &net.DNSError{Err: "timeout", IsTimeout: true}, classTransient},
+		{"dns-temporary", &net.DNSError{Err: "temp", IsTemporary: true}, classTransient},
 		{"tls-garbage", errors.New("tls: handshake failure"), classTransient},
 	}
 	for _, c := range cases {

@@ -35,13 +35,21 @@ var ErrCongested = errors.New("gave up after congestion retries")
 type failClass int
 
 const (
-	// classGenuine is a failure the remote host is responsible for: it refused
-	// the connection, reset it, or does not resolve. These count toward the
-	// dead-domain threshold unconditionally.
+	// classGenuine is a failure that is unambiguous proof the host cannot be
+	// reached at all: its name does not resolve (NXDOMAIN), or there is no
+	// network route to it. Nothing we do under our own load can manufacture
+	// these, so they count toward the dead-domain threshold. The set is
+	// deliberately narrow: a timeout, a reset, and even a refused connection are
+	// NOT here, because all three can be produced by our own concurrency against
+	// a perfectly live host (a slow or saturated link, a load balancer resetting
+	// under burst, a full accept backlog refusing the connection).
 	classGenuine failClass = iota
-	// classTransient is a timeout, a reset, or a local resource exhaustion. It
-	// counts toward the threshold only when the link is healthy; during a
-	// timeout storm it is treated as our own congestion and retried.
+	// classTransient is everything that does not prove the host is dead:
+	// timeouts, resets, refusals, TLS errors, DNS hiccups, local resource
+	// exhaustion. It never counts toward the threshold; during a timeout storm it
+	// is retried, and otherwise it is recorded as an honest failure, but it never
+	// skips a host. This is what guarantees a live-but-slow, resetting, or
+	// backlog-refusing host is never falsely declared dead.
 	classTransient
 	// classCanceled is shutdown: the run context was cancelled. It is neither
 	// counted nor retried.
@@ -66,33 +74,32 @@ func classify(err error) failClass {
 	}
 
 	if dnsErr, ok := errors.AsType[*net.DNSError](err); ok {
-		if dnsErr.IsTimeout {
+		// A DNS timeout or a temporary resolver failure is transient: under a
+		// burst of tens of thousands of lookups our own resolver can stumble on a
+		// name that resolves fine in isolation.
+		if dnsErr.IsTimeout || dnsErr.IsTemporary {
 			return classTransient
 		}
-		// No such host / NXDOMAIN: the name genuinely does not resolve.
-		return classGenuine
-	}
-
-	// Local resource exhaustion from oversubscription: too many open files, or
-	// ephemeral ports all in use. These are our fault, not the host's.
-	if errors.Is(err, syscall.EMFILE) ||
-		errors.Is(err, syscall.ENFILE) ||
-		errors.Is(err, syscall.EADDRNOTAVAIL) ||
-		errors.Is(err, syscall.EAGAIN) {
+		// No such host / NXDOMAIN: the name genuinely does not resolve. This is a
+		// clean negative answer from DNS, not a load artifact.
+		if dnsErr.IsNotFound {
+			return classGenuine
+		}
+		// Any other DNS error (server misbehaving, malformed) is ambiguous under
+		// load: do not condemn the host for it.
 		return classTransient
 	}
 
-	// Connection refused / reset / unreachable: the peer (or its network) said
-	// no. Genuine, but under heavy local load a reset can be collateral, so the
-	// engine still routes it through the congestion check before counting.
-	if errors.Is(err, syscall.ECONNREFUSED) ||
-		errors.Is(err, syscall.ECONNRESET) ||
-		errors.Is(err, syscall.EHOSTUNREACH) ||
+	// No route to the host or its network: a routing-layer verdict we cannot
+	// manufacture by sending too many requests. Genuinely unreachable.
+	if errors.Is(err, syscall.EHOSTUNREACH) ||
 		errors.Is(err, syscall.ENETUNREACH) {
 		return classGenuine
 	}
 
-	// Anything else (TLS handshake errors, malformed responses, short reads):
-	// attribute to the host, but only when the link is healthy.
+	// Everything else (refused connections, resets, TLS handshake errors,
+	// malformed responses, short reads, local resource exhaustion) is transient:
+	// each can be collateral from our own concurrency against a live host, so
+	// none of it counts toward declaring the host dead.
 	return classTransient
 }
