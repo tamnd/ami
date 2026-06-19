@@ -1,0 +1,10 @@
+title       = "ami"
+baseURL     = "https://ami.tamnd.com/"
+description = "ami (網, net) re-fetches every URL in a seed as fast as one machine sustains, then packs the results into WARC files and a columnar Parquet index. The seed can be a text file, newline JSON, a Parquet column, a sitemap, or stdin."
+contentDir  = "content"
+outputDir   = "public"
+theme       = "tago-doks"
+syntaxHighlight = "true"
+
+[params]
+github = "https://github.com/tamnd/ami"
