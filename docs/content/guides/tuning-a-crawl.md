@@ -47,8 +47,8 @@ ami crawl urls.txt --per-host 4 --domain-fail-threshold 5
 ```
 
 `--per-host` is the ceiling on concurrent connections to one host; `--domain-fail-threshold` is how many host-attributable failures a domain may rack up before ami skips the rest of its URLs.
-Only failures the host owns count toward that threshold: a refused connection, a reset, an unresolvable name.
-A timeout the engine reads as local congestion does not, and a domain that has answered even once is never skipped, so a slow-but-live host is never given up on by mistake.
+Only failures that prove a host cannot be reached count toward that threshold: a name that does not resolve, or a network with no route.
+A timeout, a reset, and a refused connection do not, because each can be collateral from your own concurrency against a live host, and a domain that has answered once or accepted a single connection is never skipped, so a slow-but-live host is never given up on by mistake.
 
 ## Timeouts and body size
 

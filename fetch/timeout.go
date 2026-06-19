@@ -35,9 +35,14 @@ type adaptiveTimeout struct {
 	current atomic.Int64 // nanoseconds
 }
 
-// newAdaptiveTimeout returns a timeout seeded at the ceiling.
+// newAdaptiveTimeout returns a timeout seeded at the ceiling. The floor is high
+// enough that a host which is merely slow to connect or answer (a distant
+// government or university server can take two to three seconds to complete a
+// TLS handshake) is given time to respond rather than aborted and recorded as a
+// failure. A fast host never reaches the floor, so this costs nothing on a
+// healthy run; it only widens the window for the slow tail.
 func newAdaptiveTimeout(ceiling time.Duration) *adaptiveTimeout {
-	a := &adaptiveTimeout{ceiling: ceiling, floor: 500 * time.Millisecond}
+	a := &adaptiveTimeout{ceiling: ceiling, floor: 3 * time.Second}
 	a.current.Store(int64(ceiling))
 	return a
 }
@@ -73,13 +78,7 @@ func (a *adaptiveTimeout) recompute(total int64) {
 			break
 		}
 	}
-	v := time.Duration(p95ms) * time.Millisecond * 2
-	if v < a.floor {
-		v = a.floor
-	}
-	if v > a.ceiling {
-		v = a.ceiling
-	}
+	v := min(max(time.Duration(p95ms)*time.Millisecond*2, a.floor), a.ceiling)
 	a.current.Store(int64(v))
 }
 
