@@ -23,7 +23,16 @@ type Config struct {
 	RunID  string
 
 	// Concurrency.
+	//
+	// Workers is the size of the goroutine pool and the ceiling on in-flight
+	// requests. The actual number of concurrent requests floats between
+	// MinInflight and Workers under an adaptive controller that tracks latency,
+	// so a thin uplink is never asked to open more connections than it sustains
+	// (which would collapse into timeouts and false-skip live hosts), while a
+	// fat pipe is driven up to Workers.
 	Workers         int
+	MinInflight     int
+	StartInflight   int
 	DNSWorkers      int
 	TransportShards int
 
@@ -36,6 +45,7 @@ type Config struct {
 	MaxConnsPerHost     int
 	MaxConnsPerIP       int
 	DomainFailThreshold int
+	MaxRetries          int
 	PerHostDelay        time.Duration
 
 	// Behaviour.
@@ -58,6 +68,8 @@ func Default() Config {
 	return Config{
 		OutDir:              "ami-out",
 		Workers:             2000,
+		MinInflight:         32,
+		StartInflight:       64,
 		DNSWorkers:          2000,
 		TransportShards:     64,
 		Timeout:             5 * time.Second,
@@ -66,6 +78,7 @@ func Default() Config {
 		MaxConnsPerHost:     8,
 		MaxConnsPerIP:       24,
 		DomainFailThreshold: 3,
+		MaxRetries:          4,
 		Mode:                ModeFast,
 		UserAgent:           "ami/" + "dev" + " (+https://ami.tamnd.com/bot)",
 		MaxBodyBytes:        2 << 20, // 2 MiB

@@ -77,6 +77,13 @@ func (r *Runner) Run(ctx context.Context, src seed.Source, onTick func(metrics.S
 		packDone <- r.consume(warc, idx, results)
 	}()
 
+	// Unblock the engine's adaptive limiter when the run is cancelled, so
+	// workers parked waiting for an in-flight slot unwind promptly.
+	go func() {
+		<-ctx.Done()
+		fetcher.Stop()
+	}()
+
 	// Worker pool.
 	var wg sync.WaitGroup
 	wg.Add(r.cfg.Workers)
@@ -84,7 +91,7 @@ func (r *Runner) Run(ctx context.Context, src seed.Source, onTick func(metrics.S
 		go func() {
 			defer wg.Done()
 			for s := range seeds {
-				res := fetcher.Fetch(ctx, toSeedURL(s))
+				res := r.fetchWithRetry(ctx, fetcher, toSeedURL(s))
 				r.record(res)
 				select {
 				case results <- res:
@@ -126,6 +133,39 @@ func (r *Runner) Run(ctx context.Context, src seed.Source, onTick func(metrics.S
 		return feedErr
 	}
 	return packErr
+}
+
+// fetchWithRetry runs one fetch and retries it while the engine reports the
+// failure as its own congestion rather than the host's fault. The adaptive
+// limiter shrinks the in-flight count after a timeout storm, so each backoff
+// gives the link a moment to drain before the next attempt; a URL that would
+// once have been false-skipped as a dead domain now gets through. After the
+// retry budget is spent it is recorded as a plain failure, never a skip, so the
+// rest of its domain is still attempted.
+func (r *Runner) fetchWithRetry(ctx context.Context, fetcher *fetch.Fetcher, su fetch.SeedURL) fetch.Result {
+	res := fetcher.Fetch(ctx, su)
+	for attempt := 1; attempt <= r.cfg.MaxRetries && fetch.IsRetry(res.Err); attempt++ {
+		select {
+		case <-time.After(retryBackoff(attempt)):
+		case <-ctx.Done():
+			res.Err = ctx.Err()
+			return res
+		}
+		res = fetcher.Fetch(ctx, su)
+	}
+	if fetch.IsRetry(res.Err) {
+		// Still congested after the budget: count it honestly as a failure,
+		// without ever marking the domain dead.
+		res.Err = fetch.ErrCongested
+	}
+	return res
+}
+
+// retryBackoff returns the pause before a congestion retry. It is deliberately
+// short: the limiter does the real work of draining the link, the backoff just
+// staggers the retries so they do not resynchronize into a fresh burst.
+func retryBackoff(attempt int) time.Duration {
+	return min(time.Duration(attempt)*75*time.Millisecond, 500*time.Millisecond)
 }
 
 // consume drains results, writing each to the WARC and the index.
