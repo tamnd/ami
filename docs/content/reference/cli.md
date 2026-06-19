@@ -42,8 +42,13 @@ See [seed formats](/guides/seed-formats/) for the inference rules and the shape 
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--workers` | `2000` | Number of concurrent fetch workers |
+| `--workers` | `2000` | Worker pool size and the ceiling on in-flight requests |
+| `--min-inflight` | `32` | Floor on the adaptive in-flight request limit |
+| `--start-inflight` | `64` | Initial in-flight limit before the controller adapts |
 | `--transport-shards` | `64` | Number of keep-alive transport pools |
+
+The number of requests actually in flight floats between `--min-inflight` and `--workers` under a congestion controller that tracks what the local uplink sustains, so a thin link is never asked to open more connections than it carries.
+See [Tuning a crawl](../../guides/tuning-a-crawl/) for how it behaves.
 
 ### Politeness and limits
 
@@ -51,7 +56,8 @@ See [seed formats](/guides/seed-formats/) for the inference rules and the shape 
 |------|---------|---------|
 | `--timeout` | `5s` | Per-request ceiling timeout |
 | `--per-host` | `8` | Max concurrent connections per host |
-| `--domain-fail-threshold` | `3` | Consecutive failures before a domain is skipped |
+| `--domain-fail-threshold` | `3` | Host-attributable failures before a domain is skipped |
+| `--max-retries` | `4` | Retries for a fetch the engine attributes to local congestion |
 | `--max-body` | `2097152` | Maximum response body bytes to store (2 MiB) |
 | `--mode` | `fast` | Header profile: `fast` (minimal) or `polite` (browser-like) |
 
