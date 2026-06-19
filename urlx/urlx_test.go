@@ -19,10 +19,10 @@ func TestHost(t *testing.T) {
 
 func TestRegisteredDomain(t *testing.T) {
 	cases := map[string]string{
-		"www.example.com": "example.com",
-		"example.com":     "example.com",
+		"www.example.com":  "example.com",
+		"example.com":      "example.com",
 		"a.b.c.example.io": "example.io",
-		"localhost":       "localhost",
+		"localhost":        "localhost",
 	}
 	for in, want := range cases {
 		if got := RegisteredDomain(in); got != want {

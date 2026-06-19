@@ -47,11 +47,11 @@ type Result struct {
 
 // Fetcher performs concurrent re-fetches with post-fetch digest comparison.
 type Fetcher struct {
-	cfg      config.Config
-	res      *resolver
-	clients  []*http.Client
-	timeout  *adaptiveTimeout
-	maxBody  int64
+	cfg     config.Config
+	res     *resolver
+	clients []*http.Client
+	timeout *adaptiveTimeout
+	maxBody int64
 
 	hostSem sync.Map // host -> chan struct{}
 	deadDom sync.Map // registered domain -> *domainState

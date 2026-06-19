@@ -51,10 +51,10 @@ func TestJSONL(t *testing.T) {
 
 func TestOpenInfer(t *testing.T) {
 	cases := map[string]string{
-		"x.jsonl":             "jsonl:x.jsonl",
-		"x.parquet":           "parquet:x.parquet",
-		"https://h/sitemap":   "sitemap:https://h/sitemap",
-		"plain.txt":           "lines:plain.txt",
+		"x.jsonl":           "jsonl:x.jsonl",
+		"x.parquet":         "parquet:x.parquet",
+		"https://h/sitemap": "sitemap:https://h/sitemap",
+		"plain.txt":         "lines:plain.txt",
 	}
 	for ref, wantName := range cases {
 		s, err := Open("", ref)

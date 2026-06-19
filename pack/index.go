@@ -37,8 +37,8 @@ type Capture struct {
 
 // IndexWriter buffers Capture rows and writes them to a zstd Parquet file.
 type IndexWriter struct {
-	f  *os.File
-	w  *parquet.GenericWriter[Capture]
+	f *os.File
+	w *parquet.GenericWriter[Capture]
 }
 
 // NewIndexWriter creates the capture index file under dir.

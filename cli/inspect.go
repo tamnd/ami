@@ -56,20 +56,20 @@ func inspect(path string, limit int) error {
 	fmt.Printf("captures: %d rows in %s\n\n", total, path)
 
 	reader := parquet.NewGenericReader[captureRow](pf)
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	rows := make([]captureRow, limit)
 	n, _ := reader.Read(rows)
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "STATUS\tBYTES\tHOST\tURL")
+	_, _ = fmt.Fprintln(tw, "STATUS\tBYTES\tHOST\tURL")
 	for i := 0; i < n; i++ {
 		r := rows[i]
 		status := fmt.Sprintf("%d", r.Status)
 		if r.Error != "" {
 			status = "ERR"
 		}
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n", status, r.BodyLength, r.Host, r.URL)
+		_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n", status, r.BodyLength, r.Host, r.URL)
 	}
 	return tw.Flush()
 }

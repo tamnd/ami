@@ -37,7 +37,7 @@ type indexRow struct {
 func TestRunEndToEnd(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "body for %s", r.URL.Path)
+		_, _ = fmt.Fprintf(w, "body for %s", r.URL.Path)
 	}))
 	defer srv.Close()
 
@@ -84,7 +84,7 @@ func TestRunEndToEnd(t *testing.T) {
 
 func TestRunUnchanged(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "stable")
+		_, _ = fmt.Fprint(w, "stable")
 	}))
 	defer srv.Close()
 
@@ -124,7 +124,7 @@ func readIndex(t *testing.T, path string) []indexRow {
 		t.Fatal(err)
 	}
 	reader := parquet.NewGenericReader[indexRow](pf)
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	rows := make([]indexRow, pf.NumRows())
 	n, _ := reader.Read(rows)
 	return rows[:n]

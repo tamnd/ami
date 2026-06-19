@@ -24,10 +24,10 @@ type Sitemap struct {
 func (s Sitemap) Name() string { return "sitemap:" + s.URL }
 
 type sitemapDoc struct {
-	XMLName  xml.Name      `xml:"urlset"`
-	URLs     []sitemapLoc  `xml:"url"`
-	IdxName  xml.Name      `xml:"sitemapindex"`
-	Sitemaps []sitemapLoc  `xml:"sitemap"`
+	XMLName  xml.Name     `xml:"urlset"`
+	URLs     []sitemapLoc `xml:"url"`
+	IdxName  xml.Name     `xml:"sitemapindex"`
+	Sitemaps []sitemapLoc `xml:"sitemap"`
 }
 
 type sitemapLoc struct {
