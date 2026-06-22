@@ -102,19 +102,8 @@ func (r *Runner) Run(ctx context.Context, src seed.Source, onTick func(metrics.S
 		}()
 	}
 
-	// Feed seeds.
-	feedErr := src.Iterate(ctx, func(s seed.Seed) error {
-		if s.URL == "" || !r.inShard(s.URL) {
-			return nil
-		}
-		r.stats.Seeded.Add(1)
-		select {
-		case seeds <- s:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	})
+	// Feed seeds, host-spread if enabled.
+	feedErr := r.feed(ctx, src, seeds)
 
 	close(seeds)
 	wg.Wait()
