@@ -2,15 +2,22 @@ package fetch
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"time"
 )
 
 // resolver wraps a small pool of pure-Go DNS resolvers and caches answers for
-// the life of a run. The system resolver is tried first; public resolvers act
-// as fallbacks when the local one is slow or refuses an answer. Results are
-// cached so a host with thousands of URLs costs one lookup.
+// the life of a run. Every resolver in the pool is raced in parallel and the
+// first usable answer wins, so a slow or overloaded local stub never gates a
+// lookup: on a crawl that resolves tens of thousands of distinct hosts, the
+// systemd-resolved stub at 127.0.0.53 both caps the rate (a few hundred
+// lookups a second) and silently drops a large fraction of perfectly
+// resolvable hosts under load, which a sequential system-first resolver turns
+// into spurious fetch failures. Racing public resolvers alongside it removes
+// both problems. Results are cached so a host with thousands of URLs costs one
+// lookup.
 type resolver struct {
 	timeout   time.Duration
 	resolvers []*net.Resolver
@@ -21,14 +28,18 @@ type resolver struct {
 }
 
 // newResolver builds the resolver pool. Each entry is a PreferGo resolver, so
-// no cgo and no thread-per-lookup blow-up under load.
+// no cgo and no thread-per-lookup blow-up under load. The system resolver is
+// one racer among several rather than the first one tried, so the local stub's
+// rate cap and load-shedding cannot bound the crawl; the public resolvers
+// answer in parallel and the fastest correct reply is taken.
 func newResolver(timeout time.Duration) *resolver {
 	return &resolver{
 		timeout: timeout,
 		resolvers: []*net.Resolver{
-			{PreferGo: true},
+			{PreferGo: true}, // the system stub, for split-horizon names; not privileged
 			udpResolver("8.8.8.8:53"),
 			udpResolver("1.1.1.1:53"),
+			udpResolver("9.9.9.9:53"),
 		},
 		cache: make(map[string][]net.IP),
 		dead:  make(map[string]struct{}),
@@ -47,8 +58,12 @@ func udpResolver(server string) *net.Resolver {
 }
 
 // lookup returns cached or freshly resolved IPs for host, ordered IPv4-first.
-// The second return is false when the host is known-dead (NXDOMAIN-ish across
-// every resolver), so callers can skip it without retrying.
+// The second return is false when the host could not be resolved. It is only
+// recorded as known-dead (so a later URL on the same host skips the lookup)
+// when every resolver in the pool authoritatively reports NXDOMAIN; a lookup
+// that merely timed out or was dropped under load is not proof the name does
+// not exist, so it is not negative-cached and the breaker is never fed a
+// manufactured death.
 func (r *resolver) lookup(ctx context.Context, host string) ([]net.IP, bool) {
 	r.mu.RLock()
 	if _, dead := r.dead[host]; dead {
@@ -61,24 +76,59 @@ func (r *resolver) lookup(ctx context.Context, host string) ([]net.IP, bool) {
 	}
 	r.mu.RUnlock()
 
-	for _, res := range r.resolvers {
-		c, cancel := context.WithTimeout(ctx, r.timeout)
-		addrs, err := res.LookupIPAddr(c, host)
-		cancel()
-		if err != nil || len(addrs) == 0 {
-			continue
-		}
-		ips := orderIPs(addrs)
+	ips, nxdomain := r.race(ctx, host)
+	if len(ips) > 0 {
 		r.mu.Lock()
 		r.cache[host] = ips
 		r.mu.Unlock()
 		return ips, true
 	}
-
-	r.mu.Lock()
-	r.dead[host] = struct{}{}
-	r.mu.Unlock()
+	if nxdomain {
+		r.mu.Lock()
+		r.dead[host] = struct{}{}
+		r.mu.Unlock()
+	}
 	return nil, false
+}
+
+// race queries every resolver in the pool concurrently and returns the first
+// usable answer, cancelling the losers. If no resolver returns addresses, the
+// nxdomain return reports whether every resolver agreed the name does not
+// exist (a definitive NXDOMAIN); if any resolver instead timed out or failed
+// transiently, nxdomain is false, because a transient miss is not proof of a
+// dead name.
+func (r *resolver) race(ctx context.Context, host string) (ips []net.IP, nxdomain bool) {
+	cctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+
+	type answer struct {
+		ips []net.IP
+		nx  bool
+	}
+	ch := make(chan answer, len(r.resolvers))
+	for _, res := range r.resolvers {
+		go func(res *net.Resolver) {
+			addrs, err := res.LookupIPAddr(cctx, host)
+			if err == nil && len(addrs) > 0 {
+				ch <- answer{ips: orderIPs(addrs)}
+				return
+			}
+			var de *net.DNSError
+			ch <- answer{nx: errors.As(err, &de) && de.IsNotFound}
+		}(res)
+	}
+
+	allNX := true
+	for range r.resolvers {
+		a := <-ch
+		if len(a.ips) > 0 {
+			return a.ips, false
+		}
+		if !a.nx {
+			allNX = false
+		}
+	}
+	return nil, allNX
 }
 
 // orderIPs returns the addresses IPv4-first; v4 connects succeed more often on

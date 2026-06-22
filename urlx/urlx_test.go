@@ -23,6 +23,16 @@ func TestRegisteredDomain(t *testing.T) {
 		"example.com":      "example.com",
 		"a.b.c.example.io": "example.io",
 		"localhost":        "localhost",
+		// Multi-level public suffixes must not collapse distinct registered
+		// domains into one key: doing so let three failures condemn an entire
+		// suffix of live hosts (the .go.jp false-dead). Each of these is its own
+		// registrable domain, not a shared "go.jp"/"co.uk"/"edu.cn" group.
+		"kantei.go.jp":     "kantei.go.jp",
+		"www.kantei.go.jp": "kantei.go.jp",
+		"ndl.go.jp":        "ndl.go.jp",
+		"ba.gov.br":        "ba.gov.br",
+		"news.bbc.co.uk":   "bbc.co.uk",
+		"whu.edu.cn":       "whu.edu.cn",
 	}
 	for in, want := range cases {
 		if got := RegisteredDomain(in); got != want {

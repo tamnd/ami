@@ -49,7 +49,10 @@ func (p Parquet) Iterate(ctx context.Context, yield func(Seed) error) error {
 	if !ok {
 		return fmt.Errorf("seed parquet %q: no \"url\" column", p.Path)
 	}
-	digestCol, hasDigest := idxByName["digest"]
+	sc := seedCols{urlCol: urlCol, cols: cols}
+	sc.digestCol, sc.hasDigest = idxByName["digest"]
+	sc.etagCol, sc.hasETag = idxByName["etag"]
+	sc.modCol, sc.hasMod = idxByName["last_modified"]
 
 	const batch = 4096
 	for _, rg := range f.RowGroups() {
@@ -62,7 +65,7 @@ func (p Parquet) Iterate(ctx context.Context, yield func(Seed) error) error {
 			}
 			n, readErr := rows.ReadRows(buf)
 			for i := 0; i < n; i++ {
-				s := rowToSeed(buf[i], cols, urlCol, digestCol, hasDigest)
+				s := rowToSeed(buf[i], sc)
 				if s.URL == "" {
 					continue
 				}
@@ -82,13 +85,23 @@ func (p Parquet) Iterate(ctx context.Context, yield func(Seed) error) error {
 	return nil
 }
 
-// rowToSeed projects one Parquet row into a Seed, copying every non-null string
-// column other than url/digest into Meta.
-func rowToSeed(row parquet.Row, cols [][]string, urlCol, digestCol int, hasDigest bool) Seed {
+// seedCols records which leaf columns carry the fields a Seed understands, so a
+// prior run's capture index can be read straight back as a recrawl seed.
+type seedCols struct {
+	cols                       [][]string
+	urlCol, digestCol          int
+	etagCol, modCol            int
+	hasDigest, hasETag, hasMod bool
+}
+
+// rowToSeed projects one Parquet row into a Seed, mapping url/digest/etag/
+// last_modified to their fields and copying every other non-null string column
+// into Meta.
+func rowToSeed(row parquet.Row, sc seedCols) Seed {
 	s := Seed{}
 	for _, v := range row {
 		col := v.Column()
-		if col < 0 || col >= len(cols) {
+		if col < 0 || col >= len(sc.cols) {
 			continue
 		}
 		if v.IsNull() || v.Kind() != parquet.ByteArray {
@@ -96,12 +109,16 @@ func rowToSeed(row parquet.Row, cols [][]string, urlCol, digestCol int, hasDiges
 		}
 		str := v.String()
 		switch {
-		case col == urlCol:
+		case col == sc.urlCol:
 			s.URL = str
-		case hasDigest && col == digestCol:
+		case sc.hasDigest && col == sc.digestCol:
 			s.Digest = str
+		case sc.hasETag && col == sc.etagCol:
+			s.ETag = str
+		case sc.hasMod && col == sc.modCol:
+			s.ModTime = str
 		default:
-			name := strings.Join(cols[col], ".")
+			name := strings.Join(sc.cols[col], ".")
 			if s.Meta == nil {
 				s.Meta = make(map[string]string)
 			}
