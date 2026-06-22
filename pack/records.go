@@ -3,9 +3,11 @@ package pack
 import (
 	"bytes"
 	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -18,9 +20,8 @@ func buildRequestRecord(targetURI string, header http.Header, date, id string) [
 	sb.WriteString(" HTTP/1.1\r\n")
 	writeHeaders(&sb, header)
 	sb.WriteString("\r\n")
-	payload := sb.String()
 
-	return warcEnvelope("request", targetURI, date, id, "application/http; msgtype=request", "", []byte(payload))
+	return warcEnvelope("request", targetURI, date, id, "application/http; msgtype=request", "", nil, []byte(sb.String()))
 }
 
 // buildResponseRecord serializes a WARC response record with a reconstructed
@@ -31,9 +32,11 @@ func buildResponseRecord(targetURI string, status int, header http.Header, body 
 	writeHeaders(&sb, header)
 	sb.WriteString("\r\n")
 
-	payload := append([]byte(sb.String()), body...)
+	// Pass the reconstructed HTTP head and the body as separate parts so the
+	// envelope writes the body straight into its buffer once, instead of first
+	// concatenating head+body into a throwaway slice (a second copy of the body).
 	digest := payloadDigest(body)
-	return warcEnvelope("response", targetURI, date, id, "application/http; msgtype=response", digest, payload)
+	return warcEnvelope("response", targetURI, date, id, "application/http; msgtype=response", digest, nil, []byte(sb.String()), body)
 }
 
 // buildRevisitRecord serializes a WARC revisit record (server-not-modified
@@ -43,7 +46,6 @@ func buildRevisitRecord(targetURI string, header http.Header, date, id, refDiges
 	sb.WriteString("HTTP/1.1 304 Not Modified\r\n")
 	writeHeaders(&sb, header)
 	sb.WriteString("\r\n")
-	payload := []byte(sb.String())
 
 	extra := []string{
 		"WARC-Profile: http://netpreserve.org/warc/1.1/revisit/identical-payload-digest",
@@ -51,12 +53,20 @@ func buildRevisitRecord(targetURI string, header http.Header, date, id, refDiges
 	if refDigest != "" {
 		extra = append(extra, "WARC-Payload-Digest: sha1:"+refDigest)
 	}
-	return warcEnvelope("revisit", targetURI, date, id, "application/http; msgtype=response", "", payload, extra...)
+	return warcEnvelope("revisit", targetURI, date, id, "application/http; msgtype=response", "", extra, []byte(sb.String()))
 }
 
-// warcEnvelope wraps a payload in WARC headers. payloadDigest, when non-empty,
-// is emitted as WARC-Payload-Digest. Extra header lines are appended verbatim.
-func warcEnvelope(typ, targetURI, date, id, contentType, payloadDigestVal string, payload []byte, extra ...string) []byte {
+// warcEnvelope wraps payload parts in WARC headers. payloadDigestVal, when
+// non-empty, is emitted as WARC-Payload-Digest. Extra header lines are appended
+// verbatim. The payload is passed in parts (for a response that is the HTTP head
+// then the body) so the body is copied into the buffer once and never
+// pre-concatenated; the buffer is grown to the exact final size up front.
+func warcEnvelope(typ, targetURI, date, id, contentType, payloadDigestVal string, extra []string, payload ...[]byte) []byte {
+	payloadLen := 0
+	for _, p := range payload {
+		payloadLen += len(p)
+	}
+
 	lines := []string{
 		"WARC/1.1",
 		"WARC-Type: " + typ,
@@ -69,12 +79,16 @@ func warcEnvelope(typ, targetURI, date, id, contentType, payloadDigestVal string
 		lines = append(lines, "WARC-Payload-Digest: sha1:"+payloadDigestVal)
 	}
 	lines = append(lines, extra...)
-	lines = append(lines, fmt.Sprintf("Content-Length: %d", len(payload)))
+	lines = append(lines, "Content-Length: "+strconv.Itoa(payloadLen))
+	head := strings.Join(lines, "\r\n")
 
 	var buf bytes.Buffer
-	buf.WriteString(strings.Join(lines, "\r\n"))
+	buf.Grow(len(head) + 4 + payloadLen + 4)
+	buf.WriteString(head)
 	buf.WriteString("\r\n\r\n")
-	buf.Write(payload)
+	for _, p := range payload {
+		buf.Write(p)
+	}
 	buf.WriteString("\r\n\r\n")
 	return buf.Bytes()
 }
@@ -99,7 +113,7 @@ func writeHeaders(sb *strings.Builder, header http.Header) {
 // payloadDigest returns the lowercase hex sha1 of the body.
 func payloadDigest(body []byte) string {
 	sum := sha1.Sum(body)
-	return fmt.Sprintf("%x", sum)
+	return hex.EncodeToString(sum[:])
 }
 
 // pathOf returns the path+query of a URL for the request line, defaulting to /.

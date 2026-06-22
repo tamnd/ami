@@ -1,6 +1,7 @@
 package pack
 
 import (
+	"bufio"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -40,14 +41,26 @@ type Capture struct {
 	MetaJSON string `parquet:"meta_json,zstd"`
 }
 
-// IndexWriter buffers Capture rows and writes them to a zstd Parquet file.
+// IndexWriter buffers Capture rows and writes them to a zstd Parquet file. Rows
+// accumulate in a slice and are handed to the Parquet writer in batches, so the
+// hot path is one append rather than a one-element slice allocation and a writer
+// call per capture. The underlying file is wrapped in a large buffered writer,
+// and the row-group size is bounded so a multi-million-row run keeps a steady
+// memory footprint instead of buffering the whole file before the first flush.
 type IndexWriter struct {
-	f *os.File
-	w *parquet.GenericWriter[Capture]
+	f   *os.File
+	bw  *bufio.Writer
+	w   *parquet.GenericWriter[Capture]
+	buf []Capture
 }
 
-// NewIndexWriter creates the capture index file under dir.
-func NewIndexWriter(dir, name string) (*IndexWriter, error) {
+// NewIndexWriter creates the capture index file under dir. batchRows is how many
+// rows are buffered before a write to the Parquet encoder; a non-positive value
+// falls back to a sane default.
+func NewIndexWriter(dir, name string, batchRows int) (*IndexWriter, error) {
+	if batchRows <= 0 {
+		batchRows = 2000
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -55,19 +68,49 @@ func NewIndexWriter(dir, name string) (*IndexWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	w := parquet.NewGenericWriter[Capture](f, parquet.Compression(&zstd.Codec{}))
-	return &IndexWriter{f: f, w: w}, nil
+	bw := bufio.NewWriterSize(f, 256*1024)
+	w := parquet.NewGenericWriter[Capture](bw,
+		parquet.Compression(&zstd.Codec{}),
+		parquet.MaxRowsPerRowGroup(int64(batchRows)*64),
+	)
+	return &IndexWriter{f: f, bw: bw, w: w, buf: make([]Capture, 0, batchRows)}, nil
 }
 
-// Write appends one capture row.
+// Write appends one capture row, flushing the batch to the encoder once it is
+// full.
 func (iw *IndexWriter) Write(c Capture) error {
-	_, err := iw.w.Write([]Capture{c})
-	return err
+	iw.buf = append(iw.buf, c)
+	if len(iw.buf) >= cap(iw.buf) {
+		return iw.flushBatch()
+	}
+	return nil
 }
 
-// Close flushes the Parquet footer and closes the file.
+// flushBatch hands the buffered rows to the Parquet encoder and resets the
+// batch.
+func (iw *IndexWriter) flushBatch() error {
+	if len(iw.buf) == 0 {
+		return nil
+	}
+	if _, err := iw.w.Write(iw.buf); err != nil {
+		return err
+	}
+	iw.buf = iw.buf[:0]
+	return nil
+}
+
+// Close flushes the pending batch and the Parquet footer, then the buffered
+// writer, then closes the file.
 func (iw *IndexWriter) Close() error {
+	if err := iw.flushBatch(); err != nil {
+		_ = iw.f.Close()
+		return err
+	}
 	if err := iw.w.Close(); err != nil {
+		_ = iw.f.Close()
+		return err
+	}
+	if err := iw.bw.Flush(); err != nil {
 		_ = iw.f.Close()
 		return err
 	}

@@ -54,7 +54,7 @@ func (r *Runner) Run(ctx context.Context, src seed.Source, onTick func(metrics.S
 	if err != nil {
 		return err
 	}
-	idx, err := pack.NewIndexWriter(outDir, "captures.parquet")
+	idx, err := pack.NewIndexWriter(outDir, "captures.parquet", r.cfg.IndexBatchRows)
 	if err != nil {
 		_ = warc.Close()
 		return err
