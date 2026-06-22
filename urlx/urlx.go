@@ -6,6 +6,8 @@ package urlx
 import (
 	"net/url"
 	"strings"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 // Host returns the lowercase hostname of a URL without the port, or "" if the
@@ -18,18 +20,22 @@ func Host(raw string) string {
 	return strings.ToLower(u.Hostname())
 }
 
-// RegisteredDomain returns a coarse eTLD-style key used only to spread load and
-// to track dead domains. It is not a true public-suffix lookup: it takes the
-// last two labels, which is good enough for fanning work across a worker pool
-// and wrong only for multi-label suffixes like co.uk, where it merely groups a
-// little more aggressively. That is acceptable for load shaping.
+// RegisteredDomain returns the registered domain (eTLD+1) for host, the key the
+// engine uses to group work per site and to track a dead domain. It is a true
+// public-suffix lookup, not a last-two-labels heuristic: under a multi-level
+// suffix like go.jp, gov.br, lg.jp, edu.cn, or co.uk, "kantei.go.jp" and
+// "ndl.go.jp" are distinct registered domains, not a single "go.jp" group.
+// That distinction is not cosmetic for the dead-domain breaker: collapsing a
+// whole public suffix into one key lets three failures anywhere under go.jp
+// condemn every live government host beneath it, a false-dead at the scale of
+// an entire suffix. A host with no eTLD+1 (a bare suffix, an IP, "localhost")
+// has no registrable domain, so it is returned unchanged as its own key.
 func RegisteredDomain(host string) string {
 	host = strings.TrimSuffix(host, ".")
-	labels := strings.Split(host, ".")
-	if len(labels) <= 2 {
-		return host
+	if d, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil {
+		return d
 	}
-	return strings.Join(labels[len(labels)-2:], ".")
+	return host
 }
 
 // Scheme reports the URL scheme in lowercase, defaulting to "http" when absent.

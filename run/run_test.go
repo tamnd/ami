@@ -29,9 +29,13 @@ func (s sliceSource) Iterate(ctx context.Context, yield func(seed.Seed) error) e
 }
 
 type indexRow struct {
-	URL    string `parquet:"url"`
-	Status int32  `parquet:"status"`
-	Digest string `parquet:"digest"`
+	URL          string `parquet:"url"`
+	Status       int32  `parquet:"status"`
+	Digest       string `parquet:"digest"`
+	ETag         string `parquet:"etag"`
+	LastModified string `parquet:"last_modified"`
+	BodyLength   int64  `parquet:"body_length"`
+	Unchanged    bool   `parquet:"unchanged"`
 }
 
 func TestRunEndToEnd(t *testing.T) {
@@ -108,6 +112,65 @@ func TestRunUnchanged(t *testing.T) {
 	}
 	if got := r2.Stats().Snapshot().NotMod; got != 1 {
 		t.Fatalf("want 1 unchanged, got %d", got)
+	}
+}
+
+// TestRunConditional304 proves the recrawl path: a first pass learns the
+// origin's ETag, and a second pass seeded with it issues If-None-Match, gets a
+// bodiless 304, and records the URL as unchanged with no body transferred. This
+// is the mechanism that lets a warm recrawl run at the engine's request-rate
+// ceiling instead of being bounded by egress bandwidth.
+func TestRunConditional304(t *testing.T) {
+	const etag = `"v1"`
+	var sawConditional bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == etag {
+			sawConditional = true
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		_, _ = fmt.Fprint(w, "stable body")
+	}))
+	defer srv.Close()
+
+	// First pass learns the ETag.
+	dir1 := t.TempDir()
+	cfg := config.Default()
+	cfg.OutDir = dir1
+	cfg.Workers = 2
+	r1 := New(cfg)
+	if err := r1.Run(context.Background(), sliceSource{[]seed.Seed{{URL: srv.URL}}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	first := readIndex(t, filepath.Join(dir1, "captures.parquet"))[0]
+	if first.ETag != etag {
+		t.Fatalf("first pass did not record etag: got %q", first.ETag)
+	}
+
+	// Second pass seeds the ETag: the server must see If-None-Match and answer 304.
+	dir2 := t.TempDir()
+	cfg.OutDir = dir2
+	r2 := New(cfg)
+	if err := r2.Run(context.Background(),
+		sliceSource{[]seed.Seed{{URL: srv.URL, Digest: first.Digest, ETag: first.ETag}}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !sawConditional {
+		t.Fatal("server never received If-None-Match on the recrawl")
+	}
+	if got := r2.Stats().Snapshot().NotMod; got != 1 {
+		t.Fatalf("want 1 unchanged from a 304, got %d", got)
+	}
+	row := readIndex(t, filepath.Join(dir2, "captures.parquet"))[0]
+	if row.Status != http.StatusNotModified {
+		t.Errorf("want status 304, got %d", row.Status)
+	}
+	if !row.Unchanged {
+		t.Error("304 row should be marked unchanged")
+	}
+	if row.BodyLength != 0 {
+		t.Errorf("304 should transfer no body, got body_length %d", row.BodyLength)
 	}
 }
 

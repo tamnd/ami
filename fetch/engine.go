@@ -36,6 +36,12 @@ type Result struct {
 	Body      []byte
 	Digest    string // sha1 hex of Body
 
+	// ETag and LastModified are the response validators, carried into the
+	// capture index so a later recrawl can issue a conditional request. On a
+	// 304 they fall back to the validators the request sent.
+	ETag         string
+	LastModified string
+
 	// Unchanged is true when Digest matches the seed's prior digest, so the
 	// content did not change since it was last captured.
 	Unchanged bool
@@ -335,6 +341,18 @@ func (f *Fetcher) Fetch(ctx context.Context, s SeedURL) Result {
 		return r
 	}
 	f.setHeaders(req)
+	// Conditional re-fetch: when the seed carries validators from a prior
+	// capture, ask the origin to answer 304 Not Modified if nothing changed.
+	// On a recrawl of a stable seed this turns most responses into a bodiless
+	// round trip, so throughput stops being bounded by egress bandwidth (the
+	// body never crosses the link) and becomes bounded by request rate and
+	// latency, which is the engine's own ceiling.
+	if s.ETag != "" {
+		req.Header.Set("If-None-Match", s.ETag)
+	}
+	if s.ModTime != "" {
+		req.Header.Set("If-Modified-Since", s.ModTime)
+	}
 	r.ReqHeader = req.Header.Clone()
 
 	start := time.Now()
@@ -364,9 +382,27 @@ func (f *Fetcher) Fetch(ctx context.Context, s SeedURL) Result {
 	f.timeout.observe(rtt)
 	f.noteDomainOK(domain)
 
-	sum := sha1.Sum(body)
 	r.Status = resp.StatusCode
 	r.Header = resp.Header
+	// Carry the response validators forward so the next recrawl can issue a
+	// conditional request for this URL. A 304 echoes them in most servers, but
+	// not all, so fall back to the validators we sent.
+	r.ETag = resp.Header.Get("ETag")
+	if r.ETag == "" {
+		r.ETag = s.ETag
+	}
+	r.LastModified = resp.Header.Get("Last-Modified")
+	if r.LastModified == "" {
+		r.LastModified = s.ModTime
+	}
+	if resp.StatusCode == http.StatusNotModified {
+		// No body crossed the link; the content is the prior capture's, so its
+		// digest carries forward unchanged.
+		r.Unchanged = true
+		r.Digest = s.Digest
+		return r
+	}
+	sum := sha1.Sum(body)
 	r.Body = body
 	r.Digest = hex.EncodeToString(sum[:])
 	r.Unchanged = s.Digest != "" && s.Digest == r.Digest
@@ -375,8 +411,15 @@ func (f *Fetcher) Fetch(ctx context.Context, s SeedURL) Result {
 
 // SeedURL is the subset of a seed the fetcher needs, decoupling fetch from the
 // seed package's concrete type.
+//
+// Digest, ETag, and ModTime are validators from a prior capture of this URL.
+// Digest drives post-fetch content comparison; ETag and ModTime drive
+// conditional requests (If-None-Match / If-Modified-Since) so an unchanged page
+// comes back as a bodiless 304.
 type SeedURL struct {
-	URL    string
-	Digest string
-	Meta   map[string]string
+	URL     string
+	Digest  string
+	ETag    string
+	ModTime string
+	Meta    map[string]string
 }
