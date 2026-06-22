@@ -6,6 +6,7 @@ package pack
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +16,20 @@ import (
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/gzip"
 )
+
+// countingWriter wraps a writer and tracks how many bytes have passed through
+// it, so the WARC writer knows each gzip member's on-disk offset and length
+// without flushing the buffer and seeking the file after every record.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
 
 // WARCWriter appends WARC records and rotates to a new file once one passes the
 // target size. Each record is its own gzip member (a "WARC record gzip"), so a
@@ -27,6 +42,8 @@ type WARCWriter struct {
 	seq  int
 	f    *os.File
 	bw   *bufio.Writer
+	cw   *countingWriter
+	gz   *gzip.Writer
 	size int64
 
 	// Offset of the next record to be written, used to populate the index.
@@ -62,7 +79,13 @@ func (w *WARCWriter) rotate() error {
 		return err
 	}
 	w.f = f
-	w.bw = bufio.NewWriterSize(f, 64*1024)
+	w.bw = bufio.NewWriterSize(f, 256*1024)
+	w.cw = &countingWriter{w: w.bw}
+	if w.gz == nil {
+		w.gz, _ = gzip.NewWriterLevel(w.cw, gzip.BestSpeed)
+	} else {
+		w.gz.Reset(w.cw)
+	}
 	w.size = 0
 	w.offset = 0
 	w.file = name
@@ -94,35 +117,26 @@ type Location struct {
 }
 
 // writeMember writes one gzip member containing block and returns its location.
+// The gzip writer is reused across records (Reset), and the on-disk offset and
+// length come from the counting writer rather than a flush-and-seek per record,
+// so the buffered writer keeps absorbing many records before it touches disk.
 func (w *WARCWriter) writeMember(block []byte) (Location, error) {
 	if w.size >= w.targetSize {
 		if err := w.rotate(); err != nil {
 			return Location{}, err
 		}
 	}
-	start := w.offset
-	gz, _ := gzip.NewWriterLevel(w.bw, gzip.BestSpeed)
-	if _, err := gz.Write(block); err != nil {
+	start := w.cw.n
+	w.gz.Reset(w.cw)
+	if _, err := w.gz.Write(block); err != nil {
 		return Location{}, err
 	}
-	if err := gz.Close(); err != nil {
+	if err := w.gz.Close(); err != nil {
 		return Location{}, err
 	}
-	// The compressed length is what advanced the buffered writer; track it via
-	// the running size delta the caller flushes. We approximate the on-disk
-	// member length from the buffered counter.
-	loc := Location{File: w.file, Offset: start}
-	// Flush so the file offset is exact, then read it back for the length.
-	if err := w.bw.Flush(); err != nil {
-		return Location{}, err
-	}
-	pos, err := w.f.Seek(0, 1)
-	if err != nil {
-		return Location{}, err
-	}
-	loc.Length = pos - start
-	w.offset = pos
-	w.size = pos
+	loc := Location{File: w.file, Offset: start, Length: w.cw.n - start}
+	w.offset = w.cw.n
+	w.size = w.cw.n
 	return loc, nil
 }
 
