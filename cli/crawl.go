@@ -109,6 +109,8 @@ func newCrawlCmd() *cobra.Command {
 	f.Int64Var(&cfg.MaxBodyBytes, "max-body", cfg.MaxBodyBytes, "maximum response body bytes to store")
 	f.Int64Var(&cfg.WARCTargetSize, "warc-size", cfg.WARCTargetSize, "target size per WARC file in bytes")
 	f.Var(modeValue{&cfg.Mode}, "mode", "header profile: fast or polite")
+	f.BoolVar(&cfg.Reorder, "reorder", cfg.Reorder, "spread the seed across hosts so throughput does not depend on input order")
+	f.IntVar(&cfg.ReorderWindow, "reorder-window", cfg.ReorderWindow, "seeds buffered for the host spread (0 = auto from --workers)")
 	f.IntVar(&cfg.Shard, "shard", cfg.Shard, "this process's partition index (0-based)")
 	f.IntVar(&cfg.ShardCount, "shards", cfg.ShardCount, "total number of partitions for distributed runs")
 	f.StringVar(&pprofAddr, "pprof", "", "serve net/http/pprof on this address (e.g. localhost:6060) for live profiling")
