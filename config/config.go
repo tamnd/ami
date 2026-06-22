@@ -61,6 +61,19 @@ type Config struct {
 	// Sharded distribution (process only partition Shard of ShardCount).
 	Shard      int
 	ShardCount int
+
+	// Reorder spreads the seed across hosts before it reaches the workers, so
+	// throughput does not depend on the order the caller listed the URLs in. A
+	// raw Common Crawl shard arrives host-clustered (many consecutive URLs share
+	// a host); fed in that order the worker pool stalls on the per-host
+	// concurrency cap. With Reorder on, the engine buffers a window of seeds and
+	// emits them round-robin across hosts, keeping a wide host set in flight
+	// whatever the input order. On by default.
+	Reorder bool
+	// ReorderWindow is how many seeds to buffer for the round-robin spread. A
+	// larger window holds more distinct hosts at once at the cost of memory.
+	// Zero selects an automatic size derived from Workers.
+	ReorderWindow int
 }
 
 // Default returns the standard configuration.
@@ -85,5 +98,6 @@ func Default() Config {
 		WARCTargetSize:      1 << 30, // 1 GiB
 		IndexBatchRows:      2000,
 		ShardCount:          1,
+		Reorder:             true,
 	}
 }
