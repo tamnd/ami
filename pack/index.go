@@ -22,6 +22,11 @@ type Capture struct {
 	Digest      string `parquet:"digest,zstd"`
 	Unchanged   bool   `parquet:"unchanged"`
 
+	// Response validators, so this index doubles as a recrawl seed: a later run
+	// reads etag/last_modified back and issues conditional requests.
+	ETag         string `parquet:"etag,zstd"`
+	LastModified string `parquet:"last_modified,zstd"`
+
 	// Pointer into the WARC.
 	WARCFile   string `parquet:"warc_file,zstd"`
 	WARCOffset int64  `parquet:"warc_offset"`

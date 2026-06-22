@@ -2,7 +2,10 @@ package cli
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/pprof"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -17,6 +20,7 @@ import (
 func newCrawlCmd() *cobra.Command {
 	cfg := config.Default()
 	var format string
+	var pprofAddr string
 
 	cmd := &cobra.Command{
 		Use:   "crawl [flags] <seed>",
@@ -30,9 +34,36 @@ func newCrawlCmd() *cobra.Command {
 			"  sitemap  an XML sitemap or sitemap index URL",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if pprofAddr != "" {
+				// Enable the contended-lock and blocking-event profiles, then serve
+				// the standard pprof endpoints so a run can be profiled live with
+				// `go tool pprof http://addr/debug/pprof/...`. The goroutine profile
+				// shows how many workers are parked waiting for an in-flight slot
+				// versus stuck in the transport, which is what pins the bottleneck.
+				runtime.SetBlockProfileRate(1)
+				runtime.SetMutexProfileFraction(1)
+				mux := http.NewServeMux()
+				mux.HandleFunc("/debug/pprof/", pprof.Index)
+				mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+				mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+				mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+				mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+				srv := &http.Server{Addr: pprofAddr, Handler: mux}
+				go func() { _ = srv.ListenAndServe() }()
+				fmt.Fprintf(os.Stderr, "ami: pprof on http://%s/debug/pprof/\n", pprofAddr)
+			}
+
+			fdLimit := raiseFDLimit()
+
 			src, err := seed.Open(format, args[0])
 			if err != nil {
 				return err
+			}
+
+			if fdLimit > 0 && uint64(cfg.Workers) > fdLimit/2 {
+				fmt.Fprintf(os.Stderr,
+					"ami: warning: --workers %d is high for the open-file limit (%d); some connections may be refused\n",
+					cfg.Workers, fdLimit)
 			}
 
 			runner := run.New(cfg)
@@ -80,6 +111,7 @@ func newCrawlCmd() *cobra.Command {
 	f.Var(modeValue{&cfg.Mode}, "mode", "header profile: fast or polite")
 	f.IntVar(&cfg.Shard, "shard", cfg.Shard, "this process's partition index (0-based)")
 	f.IntVar(&cfg.ShardCount, "shards", cfg.ShardCount, "total number of partitions for distributed runs")
+	f.StringVar(&pprofAddr, "pprof", "", "serve net/http/pprof on this address (e.g. localhost:6060) for live profiling")
 	return cmd
 }
 

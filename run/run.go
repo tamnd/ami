@@ -172,13 +172,15 @@ func retryBackoff(attempt int) time.Duration {
 func (r *Runner) consume(warc *pack.WARCWriter, idx *pack.IndexWriter, results <-chan fetch.Result) error {
 	for res := range results {
 		cap := pack.Capture{
-			URL:       res.URL,
-			Host:      urlx.Host(res.URL),
-			Status:    int32(res.Status),
-			FetchedAt: res.FetchedAt.UnixMilli(),
-			Digest:    res.Digest,
-			Unchanged: res.Unchanged,
-			MetaJSON:  pack.MetaToJSON(res.Meta),
+			URL:          res.URL,
+			Host:         urlx.Host(res.URL),
+			Status:       int32(res.Status),
+			FetchedAt:    res.FetchedAt.UnixMilli(),
+			Digest:       res.Digest,
+			Unchanged:    res.Unchanged,
+			ETag:         res.ETag,
+			LastModified: res.LastModified,
+			MetaJSON:     pack.MetaToJSON(res.Meta),
 		}
 		if res.Err != nil {
 			cap.Error = res.Err.Error()
@@ -255,5 +257,5 @@ func (r *Runner) inShard(url string) bool {
 
 // toSeedURL narrows a seed for the fetch engine.
 func toSeedURL(s seed.Seed) fetch.SeedURL {
-	return fetch.SeedURL{URL: s.URL, Digest: s.Digest, Meta: s.Meta}
+	return fetch.SeedURL{URL: s.URL, Digest: s.Digest, ETag: s.ETag, ModTime: s.ModTime, Meta: s.Meta}
 }

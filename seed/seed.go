@@ -19,7 +19,13 @@ import "context"
 type Seed struct {
 	URL    string
 	Digest string
-	Meta   map[string]string
+	// ETag and ModTime are response validators from a prior capture. When set,
+	// ami issues a conditional request (If-None-Match / If-Modified-Since) so an
+	// unchanged page returns a bodiless 304. They make a prior run's capture
+	// index usable directly as a recrawl seed.
+	ETag    string
+	ModTime string
+	Meta    map[string]string
 }
 
 // Source is a one-shot stream of seeds. Implementations push each seed to yield
