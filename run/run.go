@@ -1,12 +1,13 @@
 // Package run wires the stages together: it streams a seed source through the
 // fetch engine on a large worker pool, then funnels every result to a single
-// pack consumer that writes WARC and the capture index. Reading the network is
-// the bottleneck, so one writer keeps the output files simple and still keeps
-// up with thousands of concurrent fetches.
+// pack consumer that writes the captures. Reading the network is the
+// bottleneck, so one writer keeps the output files simple and still keeps up
+// with thousands of concurrent fetches.
 package run
 
 import (
 	"context"
+	"fmt"
 	"hash/fnv"
 	"os"
 	"path/filepath"
@@ -42,6 +43,14 @@ func (r *Runner) Run(ctx context.Context, src seed.Source, onTick func(metrics.S
 	start := time.Now()
 	r.stats = metrics.NewStats(start)
 
+	switch r.cfg.Format {
+	case "", "parquet":
+		r.cfg.Format = "parquet"
+	case "warc":
+	default:
+		return fmt.Errorf("unknown output format %q (want parquet or warc)", r.cfg.Format)
+	}
+
 	outDir := r.cfg.OutDir
 	if r.cfg.RunID != "" {
 		outDir = filepath.Join(outDir, r.cfg.RunID)
@@ -50,13 +59,22 @@ func (r *Runner) Run(ctx context.Context, src seed.Source, onTick func(metrics.S
 		return err
 	}
 
-	warc, err := pack.NewWARCWriter(outDir, "ami", r.cfg.WARCTargetSize)
-	if err != nil {
-		return err
+	// In warc format the bodies live in WARC files and the Parquet holds only the
+	// metadata index; in parquet format there is no WARC and the bodies are stored
+	// inline in the rotated Parquet itself.
+	var warc *pack.WARCWriter
+	if r.cfg.Format == "warc" {
+		w, err := pack.NewWARCWriter(outDir, "ami", r.cfg.WARCTargetSize)
+		if err != nil {
+			return err
+		}
+		warc = w
 	}
-	idx, err := pack.NewIndexWriter(outDir, "captures.parquet", r.cfg.IndexBatchRows)
+	idx, err := pack.NewIndexWriter(outDir, "captures.parquet", r.cfg.IndexBatchRows, r.cfg.CaptureTargetSize)
 	if err != nil {
-		_ = warc.Close()
+		if warc != nil {
+			_ = warc.Close()
+		}
 		return err
 	}
 
@@ -111,8 +129,10 @@ func (r *Runner) Run(ctx context.Context, src seed.Source, onTick func(metrics.S
 	packErr := <-packDone
 	close(stopTick)
 
-	if cerr := warc.Close(); cerr != nil && packErr == nil {
-		packErr = cerr
+	if warc != nil {
+		if cerr := warc.Close(); cerr != nil && packErr == nil {
+			packErr = cerr
+		}
 	}
 	if cerr := idx.Close(); cerr != nil && packErr == nil {
 		packErr = cerr
@@ -157,7 +177,10 @@ func retryBackoff(attempt int) time.Duration {
 	return min(time.Duration(attempt)*75*time.Millisecond, 500*time.Millisecond)
 }
 
-// consume drains results, writing each to the WARC and the index.
+// consume drains results, storing each captured exchange and writing its index
+// row. With a WARC writer the bytes go to the WARC and the row points at them;
+// without one (parquet body-store format) the body and reconstructed headers are
+// stored inline in the capture row.
 func (r *Runner) consume(warc *pack.WARCWriter, idx *pack.IndexWriter, results <-chan fetch.Result) error {
 	for res := range results {
 		cap := pack.Capture{
@@ -181,14 +204,25 @@ func (r *Runner) consume(warc *pack.WARCWriter, idx *pack.IndexWriter, results <
 		cap.ContentType = res.Header.Get("Content-Type")
 		cap.BodyLength = int64(len(res.Body))
 
+		// A revisit stores no body: the content is unchanged from a prior capture
+		// and only the validators need recording.
 		revisit := res.Unchanged && !r.cfg.StoreUnchanged
-		loc, err := warc.WriteResponse(res.URL, res.Status, res.ReqHeader, res.Header, res.Body, revisit, res.Digest)
-		if err != nil {
-			return err
+
+		if warc != nil {
+			loc, err := warc.WriteResponse(res.URL, res.Status, res.ReqHeader, res.Header, res.Body, revisit, res.Digest)
+			if err != nil {
+				return err
+			}
+			cap.WARCFile = loc.File
+			cap.WARCOffset = loc.Offset
+			cap.WARCLength = loc.Length
+		} else {
+			cap.ReqHeaders = pack.RequestHead(res.URL, res.ReqHeader)
+			cap.RespHeaders = pack.ResponseHead(res.Status, res.Header)
+			if !revisit {
+				cap.Body = res.Body
+			}
 		}
-		cap.WARCFile = loc.File
-		cap.WARCOffset = loc.Offset
-		cap.WARCLength = loc.Length
 		if err := idx.Write(cap); err != nil {
 			return err
 		}

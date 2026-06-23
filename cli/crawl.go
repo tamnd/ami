@@ -26,7 +26,9 @@ func newCrawlCmd() *cobra.Command {
 		Use:   "crawl [flags] <seed>",
 		Short: "Fetch every URL in a seed and pack the results",
 		Long: "crawl reads a seed (a list of URLs), re-fetches each one concurrently,\n" +
-			"and writes WARC files plus a captures.parquet index under --out.\n\n" +
+			"and writes the captures under --out. The default --format parquet stores\n" +
+			"bodies and headers in rotated zstd Parquet files; --format warc writes\n" +
+			"classic WARC files plus a metadata-only Parquet index.\n\n" +
 			"The seed format is inferred from the path, or set it with --from:\n" +
 			"  lines    one URL per line (default; - means stdin)\n" +
 			"  jsonl    newline-delimited JSON objects with a \"url\" field\n" +
@@ -95,7 +97,7 @@ func newCrawlCmd() *cobra.Command {
 
 	f := cmd.Flags()
 	f.StringVar(&format, "from", "", "seed format: lines, jsonl, parquet, sitemap (default: infer from path)")
-	f.StringVarP(&cfg.OutDir, "out", "o", cfg.OutDir, "output directory for WARC and the capture index")
+	f.StringVarP(&cfg.OutDir, "out", "o", cfg.OutDir, "output directory for the captures")
 	f.StringVar(&cfg.RunID, "run-id", "", "subdirectory under --out for this run")
 	f.IntVar(&cfg.Workers, "workers", cfg.Workers, "worker pool size and the ceiling on adaptive in-flight requests")
 	f.IntVar(&cfg.MinInflight, "min-inflight", cfg.MinInflight, "floor on the adaptive in-flight request limit")
@@ -107,7 +109,9 @@ func newCrawlCmd() *cobra.Command {
 	f.IntVar(&cfg.MaxRetries, "max-retries", cfg.MaxRetries, "retries for a fetch the engine attributes to local congestion")
 	f.BoolVar(&cfg.StoreUnchanged, "store-unchanged", cfg.StoreUnchanged, "store the full body even when the digest is unchanged")
 	f.Int64Var(&cfg.MaxBodyBytes, "max-body", cfg.MaxBodyBytes, "maximum response body bytes to store")
-	f.Int64Var(&cfg.WARCTargetSize, "warc-size", cfg.WARCTargetSize, "target size per WARC file in bytes")
+	f.StringVar(&cfg.Format, "format", cfg.Format, "capture format: parquet (compact zstd body store) or warc")
+	f.Int64Var(&cfg.WARCTargetSize, "warc-size", cfg.WARCTargetSize, "target size per WARC file in bytes (warc format)")
+	f.Int64Var(&cfg.CaptureTargetSize, "capture-size", cfg.CaptureTargetSize, "uncompressed payload bytes per rotated parquet capture file")
 	f.Var(modeValue{&cfg.Mode}, "mode", "header profile: fast or polite")
 	f.BoolVar(&cfg.Reorder, "reorder", cfg.Reorder, "spread the seed across hosts so throughput does not depend on input order")
 	f.IntVar(&cfg.ReorderWindow, "reorder-window", cfg.ReorderWindow, "seeds buffered for the host spread (0 = auto from --workers)")

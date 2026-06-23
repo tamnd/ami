@@ -53,6 +53,7 @@ func (p Parquet) Iterate(ctx context.Context, yield func(Seed) error) error {
 	sc.digestCol, sc.hasDigest = idxByName["digest"]
 	sc.etagCol, sc.hasETag = idxByName["etag"]
 	sc.modCol, sc.hasMod = idxByName["last_modified"]
+	sc.skip = captureBodyColumns
 
 	const batch = 4096
 	for _, rg := range f.RowGroups() {
@@ -85,13 +86,24 @@ func (p Parquet) Iterate(ctx context.Context, yield func(Seed) error) error {
 	return nil
 }
 
+// captureBodyColumns are the heavy capture columns a parquet body-store file
+// carries that must not be surfaced as seed Meta: the raw body and the
+// reconstructed header blocks would bloat (or, for the binary body, corrupt)
+// the Meta map of a recrawl seed.
+var captureBodyColumns = map[string]bool{
+	"body":         true,
+	"resp_headers": true,
+	"req_headers":  true,
+}
+
 // seedCols records which leaf columns carry the fields a Seed understands, so a
-// prior run's capture index can be read straight back as a recrawl seed.
+// prior run's capture file can be read straight back as a recrawl seed.
 type seedCols struct {
 	cols                       [][]string
 	urlCol, digestCol          int
 	etagCol, modCol            int
 	hasDigest, hasETag, hasMod bool
+	skip                       map[string]bool
 }
 
 // rowToSeed projects one Parquet row into a Seed, mapping url/digest/etag/
@@ -119,6 +131,9 @@ func rowToSeed(row parquet.Row, sc seedCols) Seed {
 			s.ModTime = str
 		default:
 			name := strings.Join(sc.cols[col], ".")
+			if sc.skip[name] {
+				continue
+			}
 			if s.Meta == nil {
 				s.Meta = make(map[string]string)
 			}

@@ -54,9 +54,27 @@ type Config struct {
 	StoreUnchanged bool
 	MaxBodyBytes   int64
 
+	// Output.
+	//
+	// Format selects how captured exchanges are stored:
+	//   parquet  bodies and reconstructed headers go into rotated, zstd-compressed
+	//            Parquet files (captures-NNNNN.parquet). Columnar zstd compresses
+	//            thousands of similar pages together, so this is several times
+	//            smaller on disk than per-record gzip WARC, and the crawl is
+	//            network-bound so the extra compression is effectively free.
+	//   warc     classic WARC/1.1 files (one gzip member per record) plus a
+	//            metadata-only Parquet index pointing into them, for archival
+	//            fidelity and interop with the web-archiving ecosystem.
+	Format string
+
 	// Output sizing.
 	WARCTargetSize int64
-	IndexBatchRows int
+	// CaptureTargetSize rotates the Parquet capture files once this many
+	// uncompressed payload bytes have accumulated, so a long run produces a series
+	// of bounded, independently readable files instead of one giant file finalized
+	// only at the end. Completed files can be offloaded and deleted mid-run.
+	CaptureTargetSize int64
+	IndexBatchRows    int
 
 	// Sharded distribution (process only partition Shard of ShardCount).
 	Shard      int
@@ -95,7 +113,9 @@ func Default() Config {
 		Mode:                ModeFast,
 		UserAgent:           "ami/" + "dev" + " (+https://ami.tamnd.com/bot)",
 		MaxBodyBytes:        2 << 20, // 2 MiB
+		Format:              "parquet",
 		WARCTargetSize:      1 << 30, // 1 GiB
+		CaptureTargetSize:   1 << 30, // 1 GiB of uncompressed payload per file
 		IndexBatchRows:      2000,
 		ShardCount:          1,
 		Reorder:             true,
