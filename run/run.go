@@ -222,6 +222,10 @@ func (r *Runner) consume(warc *pack.WARCWriter, idx *pack.IndexWriter, results <
 		}
 		cap.ContentType = res.Header.Get("Content-Type")
 		cap.BodyLength = int64(len(res.Body))
+		cap.TTFBMS = res.TTFB.Milliseconds()
+		cap.FetchDurMS = res.FetchDuration.Milliseconds()
+		cap.FinalURL = res.FinalURL
+		cap.IPAddress = res.IP
 
 		// A revisit stores no body: the content is unchanged from a prior capture
 		// and only the validators need recording.

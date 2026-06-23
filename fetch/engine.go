@@ -51,6 +51,12 @@ type Result struct {
 
 	// Err is non-nil for transport/DNS/timeout failures (no HTTP response).
 	Err error
+
+	// Timing fields (zero if not captured).
+	TTFB          time.Duration // time from request send to first byte of response
+	FetchDuration time.Duration // total wall-clock from request start to body read done
+	FinalURL      string        // URL after following redirects; equals URL if no redirect
+	IP            string        // IP address of the server that responded
 }
 
 // Fetcher performs concurrent re-fetches with post-fetch digest comparison.
@@ -95,8 +101,16 @@ func New(cfg config.Config) *Fetcher {
 	f.clients = make([]*http.Client, cfg.TransportShards)
 	for i := range f.clients {
 		f.clients[i] = &http.Client{
-			Transport:     f.newTransport(res),
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+			Transport: f.newTransport(res),
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if cfg.MaxRedirects > 0 && len(via) >= cfg.MaxRedirects {
+					return http.ErrUseLastResponse
+				}
+				if cfg.MaxRedirects == 0 {
+					return http.ErrUseLastResponse
+				}
+				return nil
+			},
 		}
 	}
 	return f
@@ -323,12 +337,24 @@ func (f *Fetcher) Fetch(ctx context.Context, s SeedURL) Result {
 	// GotConn covers a freshly dialed or pooled connection; TLSHandshakeStart
 	// additionally covers an https host whose TCP connects but whose TLS
 	// handshake is too slow to finish within the deadline.
+	var ttfbOnce sync.Once
+	var ttfbAt time.Time
 	reqCtx = httptrace.WithClientTrace(reqCtx, &httptrace.ClientTrace{
 		GotConn: func(httptrace.GotConnInfo) {
 			f.noteDomainReachable(domain)
 		},
 		TLSHandshakeStart: func() {
 			f.noteDomainReachable(domain)
+		},
+		GotFirstResponseByte: func() {
+			ttfbOnce.Do(func() { ttfbAt = time.Now() })
+		},
+		ConnectDone: func(network, addr string, err error) {
+			if err == nil && r.IP == "" {
+				if host, _, herr := net.SplitHostPort(addr); herr == nil {
+					r.IP = host
+				}
+			}
 		},
 	})
 
@@ -371,6 +397,11 @@ func (f *Fetcher) Fetch(ctx context.Context, s SeedURL) Result {
 	}
 	_ = resp.Body.Close()
 	rtt := time.Since(start)
+	r.FetchDuration = rtt
+	if !ttfbAt.IsZero() {
+		r.TTFB = ttfbAt.Sub(start)
+	}
+	r.FinalURL = resp.Request.URL.String()
 	cancel()
 	release()
 	if rerr != nil {

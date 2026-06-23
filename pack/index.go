@@ -49,6 +49,12 @@ type Capture struct {
 	Markdown       string `parquet:"markdown"`
 	MarkdownLength int64  `parquet:"markdown_length"`
 
+	// Timing and network metadata captured during the fetch.
+	TTFBMS    int64  `parquet:"ttfb_ms"`         // time to first byte in milliseconds
+	FetchDurMS int64  `parquet:"fetch_duration_ms"` // total fetch wall-clock in milliseconds
+	FinalURL  string `parquet:"final_url"`         // URL after following redirects; empty if same as URL
+	IPAddress string `parquet:"ip_address"`        // IP that served the response
+
 	// The captured exchange, stored inline in the parquet body-store format and
 	// left empty in warc format (where the bytes live in the WARC instead). The
 	// header fields hold the reconstructed HTTP head text, so a reader can rebuild

@@ -46,6 +46,7 @@ type Config struct {
 	MaxConnsPerIP       int
 	DomainFailThreshold int
 	MaxRetries          int
+	MaxRedirects        int
 	PerHostDelay        time.Duration
 
 	// Behaviour.
@@ -116,6 +117,7 @@ func Default() Config {
 		MaxConnsPerIP:       24,
 		DomainFailThreshold: 3,
 		MaxRetries:          4,
+		MaxRedirects:        5,
 		Mode:                ModeFast,
 		UserAgent:           "ami/" + "dev" + " (+https://ami.tamnd.com/bot)",
 		MaxBodyBytes:        2 << 20, // 2 MiB
