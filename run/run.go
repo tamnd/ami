@@ -16,11 +16,22 @@ import (
 
 	"github.com/tamnd/ami/config"
 	"github.com/tamnd/ami/fetch"
+	"github.com/tamnd/ami/markdown"
 	"github.com/tamnd/ami/metrics"
 	"github.com/tamnd/ami/pack"
 	"github.com/tamnd/ami/seed"
 	"github.com/tamnd/ami/urlx"
 )
+
+// result carries a fetch result plus anything the run layer derives from it on
+// the worker pool, so that CPU work (Markdown conversion) is parallelised across
+// the workers instead of serialised in the single pack consumer. Markdown is the
+// rendered body, empty unless the crawl runs with --markdown and the body is
+// convertible HTML.
+type result struct {
+	fetch.Result
+	Markdown string
+}
 
 // Runner executes one crawl end to end.
 type Runner struct {
@@ -81,7 +92,7 @@ func (r *Runner) Run(ctx context.Context, src seed.Source, onTick func(metrics.S
 	fetcher := fetch.New(r.cfg)
 
 	seeds := make(chan seed.Seed, r.cfg.Workers*2)
-	results := make(chan fetch.Result, r.cfg.Workers*2)
+	results := make(chan result, r.cfg.Workers*2)
 
 	// Periodic display.
 	stopTick := make(chan struct{})
@@ -111,8 +122,16 @@ func (r *Runner) Run(ctx context.Context, src seed.Source, onTick func(metrics.S
 			for s := range seeds {
 				res := r.fetchWithRetry(ctx, fetcher, toSeedURL(s))
 				r.record(res)
+				rr := result{Result: res}
+				// Convert to Markdown here, on the worker, so the cost is spread
+				// across the pool rather than bottlenecking the single consumer.
+				if r.cfg.Markdown && r.cfg.Format == "parquet" && res.Err == nil && len(res.Body) > 0 {
+					if md, ok := markdown.Convert(res.Body, res.Header.Get("Content-Type"), res.URL); ok {
+						rr.Markdown = md
+					}
+				}
 				select {
-				case results <- res:
+				case results <- rr:
 				case <-ctx.Done():
 					return
 				}
@@ -181,7 +200,7 @@ func retryBackoff(attempt int) time.Duration {
 // row. With a WARC writer the bytes go to the WARC and the row points at them;
 // without one (parquet body-store format) the body and reconstructed headers are
 // stored inline in the capture row.
-func (r *Runner) consume(warc *pack.WARCWriter, idx *pack.IndexWriter, results <-chan fetch.Result) error {
+func (r *Runner) consume(warc *pack.WARCWriter, idx *pack.IndexWriter, results <-chan result) error {
 	for res := range results {
 		cap := pack.Capture{
 			URL:          res.URL,
@@ -221,6 +240,8 @@ func (r *Runner) consume(warc *pack.WARCWriter, idx *pack.IndexWriter, results <
 			cap.RespHeaders = pack.ResponseHead(res.Status, res.Header)
 			if !revisit {
 				cap.Body = res.Body
+				cap.Markdown = res.Markdown
+				cap.MarkdownLength = int64(len(res.Markdown))
 			}
 		}
 		if err := idx.Write(cap); err != nil {

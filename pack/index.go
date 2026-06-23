@@ -42,6 +42,13 @@ type Capture struct {
 	// arbitrary producer context survives without a fixed schema.
 	MetaJSON string `parquet:"meta_json"`
 
+	// Markdown is the body rendered to Markdown, populated only when the crawl ran
+	// with --markdown and the response was HTML that yielded an article. It is
+	// empty otherwise. MarkdownLength is its byte length, so a reader can size the
+	// text column without decompressing it.
+	Markdown       string `parquet:"markdown"`
+	MarkdownLength int64  `parquet:"markdown_length"`
+
 	// The captured exchange, stored inline in the parquet body-store format and
 	// left empty in warc format (where the bytes live in the WARC instead). The
 	// header fields hold the reconstructed HTTP head text, so a reader can rebuild
@@ -187,7 +194,7 @@ func (iw *IndexWriter) Close() error {
 // approxPayloadBytes estimates a row's uncompressed footprint, dominated by the
 // body, for the rotation threshold. It need not be exact.
 func approxPayloadBytes(c Capture) int64 {
-	return int64(len(c.Body) + len(c.RespHeaders) + len(c.ReqHeaders) + len(c.URL) + len(c.MetaJSON) + 128)
+	return int64(len(c.Body) + len(c.RespHeaders) + len(c.ReqHeaders) + len(c.URL) + len(c.MetaJSON) + len(c.Markdown) + 128)
 }
 
 // MetaToJSON encodes a meta map to a compact JSON object string, returning ""

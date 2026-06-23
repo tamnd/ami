@@ -54,6 +54,12 @@ type Config struct {
 	StoreUnchanged bool
 	MaxBodyBytes   int64
 
+	// Markdown converts each HTML response to Markdown and stores it in the
+	// markdown column of the capture (parquet format only). It is CPU work done
+	// on the worker pool, so on a network-bound crawl it is close to free; on a
+	// fast local source it lowers throughput. Off by default.
+	Markdown bool
+
 	// Output.
 	//
 	// Format selects how captured exchanges are stored:

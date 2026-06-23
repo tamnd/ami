@@ -54,12 +54,13 @@ func captureFiles(arg string) ([]string, error) {
 // captureRow mirrors pack.Capture for read-back; kept local so inspect does not
 // import the writer's internal layout.
 type captureRow struct {
-	URL        string `parquet:"url"`
-	Host       string `parquet:"host"`
-	Status     int32  `parquet:"status"`
-	BodyLength int64  `parquet:"body_length"`
-	WARCFile   string `parquet:"warc_file"`
-	Error      string `parquet:"error"`
+	URL            string `parquet:"url"`
+	Host           string `parquet:"host"`
+	Status         int32  `parquet:"status"`
+	BodyLength     int64  `parquet:"body_length"`
+	MarkdownLength int64  `parquet:"markdown_length"`
+	WARCFile       string `parquet:"warc_file"`
+	Error          string `parquet:"error"`
 }
 
 func inspect(arg string, limit int) error {
@@ -105,14 +106,32 @@ func inspect(arg string, limit int) error {
 		fmt.Printf("captures: %d rows across %d files in %s\n\n", total, len(files), arg)
 	}
 
+	// Only show the markdown column when at least one sampled row carries it, so a
+	// crawl run without --markdown keeps the terse layout.
+	hasMarkdown := false
+	for _, r := range sample {
+		if r.MarkdownLength > 0 {
+			hasMarkdown = true
+			break
+		}
+	}
+
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "STATUS\tBYTES\tHOST\tURL")
+	if hasMarkdown {
+		_, _ = fmt.Fprintln(tw, "STATUS\tBYTES\tMD\tHOST\tURL")
+	} else {
+		_, _ = fmt.Fprintln(tw, "STATUS\tBYTES\tHOST\tURL")
+	}
 	for _, r := range sample {
 		status := fmt.Sprintf("%d", r.Status)
 		if r.Error != "" {
 			status = "ERR"
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n", status, r.BodyLength, r.Host, r.URL)
+		if hasMarkdown {
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%d\t%s\t%s\n", status, r.BodyLength, r.MarkdownLength, r.Host, r.URL)
+		} else {
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n", status, r.BodyLength, r.Host, r.URL)
+		}
 	}
 	return tw.Flush()
 }
