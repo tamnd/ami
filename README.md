@@ -21,7 +21,30 @@ Full docs and guides live at **[ami.tamnd.com](https://ami.tamnd.com)**.
 ## Install
 
 ```bash
+# Go
 go install github.com/tamnd/ami/cmd/ami@latest
+
+# Homebrew (macOS)
+brew install tamnd/tap/ami
+
+# Scoop (Windows)
+scoop bucket add tamnd https://github.com/tamnd/scoop-bucket
+scoop install ami
+```
+
+On Linux, a signed apt and dnf repository tracks every release:
+
+```bash
+# Debian, Ubuntu
+curl -fsSL https://tamnd.github.io/linux-repo/gpg.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/tamnd.gpg
+echo "deb [signed-by=/usr/share/keyrings/tamnd.gpg] https://tamnd.github.io/linux-repo/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/tamnd.list
+sudo apt update && sudo apt install ami
+
+# Fedora, RHEL
+sudo dnf config-manager --add-repo https://tamnd.github.io/linux-repo/dnf/tamnd.repo
+sudo dnf install ami
 ```
 
 Prefer a prebuilt binary? Grab an archive, a `.deb`/`.rpm`/`.apk`, or a checksum from [releases](https://github.com/tamnd/ami/releases). Or use the container image:
