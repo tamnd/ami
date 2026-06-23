@@ -46,6 +46,7 @@ type Config struct {
 	MaxConnsPerIP       int
 	DomainFailThreshold int
 	MaxRetries          int
+	MaxRedirects        int
 	PerHostDelay        time.Duration
 
 	// Behaviour.
@@ -53,6 +54,12 @@ type Config struct {
 	UserAgent      string
 	StoreUnchanged bool
 	MaxBodyBytes   int64
+
+	// Markdown converts each HTML response to Markdown and stores it in the
+	// markdown column of the capture (parquet format only). It is CPU work done
+	// on the worker pool, so on a network-bound crawl it is close to free; on a
+	// fast local source it lowers throughput. Off by default.
+	Markdown bool
 
 	// Output.
 	//
@@ -110,6 +117,7 @@ func Default() Config {
 		MaxConnsPerIP:       24,
 		DomainFailThreshold: 3,
 		MaxRetries:          4,
+		MaxRedirects:        5,
 		Mode:                ModeFast,
 		UserAgent:           "ami/" + "dev" + " (+https://ami.tamnd.com/bot)",
 		MaxBodyBytes:        2 << 20, // 2 MiB

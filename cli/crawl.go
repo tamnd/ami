@@ -110,6 +110,7 @@ func newCrawlCmd() *cobra.Command {
 	f.BoolVar(&cfg.StoreUnchanged, "store-unchanged", cfg.StoreUnchanged, "store the full body even when the digest is unchanged")
 	f.Int64Var(&cfg.MaxBodyBytes, "max-body", cfg.MaxBodyBytes, "maximum response body bytes to store")
 	f.StringVar(&cfg.Format, "format", cfg.Format, "capture format: parquet (compact zstd body store) or warc")
+	f.BoolVar(&cfg.Markdown, "markdown", cfg.Markdown, "convert each HTML body to Markdown and store it in the markdown column (parquet format)")
 	f.Int64Var(&cfg.WARCTargetSize, "warc-size", cfg.WARCTargetSize, "target size per WARC file in bytes (warc format)")
 	f.Int64Var(&cfg.CaptureTargetSize, "capture-size", cfg.CaptureTargetSize, "uncompressed payload bytes per rotated parquet capture file")
 	f.Var(modeValue{&cfg.Mode}, "mode", "header profile: fast or polite")
