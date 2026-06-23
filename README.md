@@ -6,7 +6,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/tamnd/ami)](https://goreportcard.com/report/github.com/tamnd/ami)
 [![License](https://img.shields.io/github/license/tamnd/ami)](./LICENSE)
 
-**ami** (網, "net") re-fetches every URL in a seed (a list of URLs) as fast as one machine sustains, then packs the results into WARC files and a columnar Parquet index.
+**ami** (網, "net") re-fetches every URL in a seed (a list of URLs) as fast as one machine sustains, then packs the results into rotated, zstd-compressed Parquet files. WARC output is still available with `--format warc`.
 The seed can be a text file, newline JSON, a Parquet column, a sitemap, or stdin.
 They all feed the same fetch engine.
 
@@ -44,15 +44,15 @@ https://example.com/about
 https://www.iana.org/help/example-domains
 EOF
 
-# Crawl it: writes WARC files and captures.parquet under ami-out/
+# Crawl it: writes rotated captures-NNNNN.parquet under ami-out/
 ami crawl urls.txt
 
 # Look at what landed, no Parquet tool needed
-ami inspect ami-out/captures.parquet
+ami inspect ami-out/
 ```
 
 ```
-captures: 3 rows in ami-out/captures.parquet
+captures: 3 rows in ami-out/captures-00000.parquet
 
 STATUS  BYTES  HOST                 URL
 200     1256   example.com          https://example.com/
@@ -82,16 +82,16 @@ With JSONL, any field other than `url` rides along as per-capture metadata and l
 
 ## Output
 
-A crawl writes two kinds of output under `--out` (default `ami-out`):
+A crawl writes a series of rotated Parquet files under `--out` (default `ami-out`):
 
 ```
 ami-out/
-├── ami-00000.warc.gz      # responses, gzipped WARC 1.1, rolled at --warc-size
-├── ami-00001.warc.gz
-└── captures.parquet       # one row per fetch, pointing back into the WARC
+├── captures-00000.parquet   # rows + inline bodies, zstd, rolled at --capture-size
+├── captures-00001.parquet
+└── captures-00002.parquet
 ```
 
-The WARC files open in any WARC tool. `captures.parquet` carries one row per fetch with these columns:
+Each file is finalized with its own footer, so it is independently readable and can be offloaded and deleted mid-run while the crawl keeps going. The bodies live inline in a `body` column, compressed columnar with zstd. Because zstd packs thousands of similar pages together, this is several times smaller on disk than per-record gzip WARC, and the crawl is network-bound so the heavier compression is effectively free. Each row carries these columns:
 
 | Column | Type | Meaning |
 | --- | --- | --- |
@@ -103,13 +103,17 @@ The WARC files open in any WARC tool. `captures.parquet` carries one row per fet
 | `body_length` | int64 | stored body length in bytes |
 | `digest` | string | SHA-1 of the body, for change detection |
 | `unchanged` | bool | true when the digest matched the seed's prior digest |
-| `warc_file` | string | WARC file holding the response |
-| `warc_offset` | int64 | byte offset of the record in that file |
-| `warc_length` | int64 | byte length of the record |
+| `etag` | string | response `ETag`, replayed as `If-None-Match` on a recrawl |
+| `last_modified` | string | response `Last-Modified`, replayed as `If-Modified-Since` |
+| `resp_headers` | string | reconstructed HTTP response head (status line + headers) |
+| `req_headers` | string | reconstructed HTTP request head ami sent |
+| `body` | bytes | the response body (empty on an unchanged revisit) |
 | `error` | string | failure text (empty on success) |
 | `meta_json` | string | the seed's per-URL metadata as a JSON object (empty when none) |
 
-The three `warc_*` columns are a direct pointer: open the file, seek to the offset, read the length, and you have the exact record. The index reads in DuckDB, pandas, or `ami inspect`.
+The index reads in DuckDB, pandas, or `ami inspect`. A prior run's capture files can be fed straight back as a recrawl seed (`--from parquet`): ami reads `url`/`digest`/`etag`/`last_modified` and issues conditional requests, while the heavy `body`/header columns are ignored.
+
+With `--format warc`, ami instead writes classic WARC/1.1 files (`ami-NNNNN.warc.gz`, one gzip member per record) plus a metadata-only Parquet index whose `warc_file`/`warc_offset`/`warc_length` columns point at each record. Use it for archival fidelity and interop with the web-archiving ecosystem.
 
 ## Flags
 
@@ -118,7 +122,7 @@ The three `warc_*` columns are a direct pointer: open the file, seek to the offs
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--from` | infer | seed format: `lines`, `jsonl`, `parquet`, `sitemap` |
-| `-o, --out` | `ami-out` | output directory for the WARC files and the index |
+| `-o, --out` | `ami-out` | output directory for the captures |
 | `--run-id` | | subdirectory under `--out` for this run |
 | `--workers` | `2000` | concurrent fetch workers |
 | `--transport-shards` | `64` | keep-alive transport pools |
@@ -127,7 +131,9 @@ The three `warc_*` columns are a direct pointer: open the file, seek to the offs
 | `--domain-fail-threshold` | `3` | consecutive failures before a domain is skipped |
 | `--store-unchanged` | `false` | store the full body even when the digest is unchanged |
 | `--max-body` | `2097152` | max response body bytes to store (2 MiB) |
-| `--warc-size` | `1073741824` | target bytes per WARC file before rolling over (1 GiB) |
+| `--format` | `parquet` | capture format: `parquet` (compact zstd body store) or `warc` |
+| `--capture-size` | `1073741824` | uncompressed payload bytes per rotated Parquet file (1 GiB) |
+| `--warc-size` | `1073741824` | target bytes per WARC file before rolling over, `--format warc` (1 GiB) |
 | `--mode` | `fast` | header profile: `fast` or `polite` |
 | `--shard` | `0` | this process's partition index (0-based) |
 | `--shards` | `1` | total partitions for a distributed run |

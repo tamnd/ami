@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
 
 	"github.com/parquet-go/parquet-go"
@@ -15,15 +16,39 @@ func newInspectCmd() *cobra.Command {
 	var limit int
 
 	cmd := &cobra.Command{
-		Use:   "inspect <captures.parquet>",
+		Use:   "inspect <dir|captures-NNNNN.parquet>",
 		Short: "Summarize a capture index and print a sample of rows",
-		Args:  cobra.ExactArgs(1),
+		Long: "inspect summarizes a crawl's capture index. Point it at an output\n" +
+			"directory to aggregate every rotated captures-NNNNN.parquet file, or at\n" +
+			"a single capture file.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return inspect(args[0], limit)
 		},
 	}
 	cmd.Flags().IntVarP(&limit, "limit", "n", 10, "number of sample rows to print")
 	return cmd
+}
+
+// captureFiles resolves the inspect argument to the capture files to read. A
+// directory expands to every rotated captures-*.parquet inside it; anything else
+// is taken as a single file path.
+func captureFiles(arg string) ([]string, error) {
+	info, err := os.Stat(arg)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return []string{arg}, nil
+	}
+	files, err := filepath.Glob(filepath.Join(arg, "captures-*.parquet"))
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no captures-*.parquet files in %s", arg)
+	}
+	return files, nil
 }
 
 // captureRow mirrors pack.Capture for read-back; kept local so inspect does not
@@ -37,34 +62,52 @@ type captureRow struct {
 	Error      string `parquet:"error"`
 }
 
-func inspect(path string, limit int) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	info, err := f.Stat()
+func inspect(arg string, limit int) error {
+	files, err := captureFiles(arg)
 	if err != nil {
 		return err
 	}
 
-	pf, err := parquet.OpenFile(f, info.Size())
-	if err != nil {
-		return err
+	// Total rows across every rotated file, plus a sample drawn from the files in
+	// order until the limit is filled.
+	var total int64
+	var sample []captureRow
+	for _, path := range files {
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		info, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			return err
+		}
+		pf, err := parquet.OpenFile(f, info.Size())
+		if err != nil {
+			_ = f.Close()
+			return err
+		}
+		total += pf.NumRows()
+
+		if len(sample) < limit {
+			reader := parquet.NewGenericReader[captureRow](pf)
+			rows := make([]captureRow, limit-len(sample))
+			n, _ := reader.Read(rows)
+			sample = append(sample, rows[:n]...)
+			_ = reader.Close()
+		}
+		_ = f.Close()
 	}
-	total := pf.NumRows()
-	fmt.Printf("captures: %d rows in %s\n\n", total, path)
 
-	reader := parquet.NewGenericReader[captureRow](pf)
-	defer func() { _ = reader.Close() }()
-
-	rows := make([]captureRow, limit)
-	n, _ := reader.Read(rows)
+	if len(files) == 1 {
+		fmt.Printf("captures: %d rows in %s\n\n", total, files[0])
+	} else {
+		fmt.Printf("captures: %d rows across %d files in %s\n\n", total, len(files), arg)
+	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "STATUS\tBYTES\tHOST\tURL")
-	for i := 0; i < n; i++ {
-		r := rows[i]
+	for _, r := range sample {
 		status := fmt.Sprintf("%d", r.Status)
 		if r.Error != "" {
 			status = "ERR"

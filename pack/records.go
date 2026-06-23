@@ -11,32 +11,43 @@ import (
 	"strings"
 )
 
-// buildRequestRecord serializes a WARC request record reconstructed from the
-// request headers ami sent.
-func buildRequestRecord(targetURI string, header http.Header, date, id string) []byte {
+// ResponseHead reconstructs the HTTP response head (status line plus headers) as
+// text, ending with the blank line that separates head from body. The parquet
+// body store keeps this alongside the body so a reader can rebuild the full
+// response without a WARC.
+func ResponseHead(status int, header http.Header) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "HTTP/1.1 %d %s\r\n", status, http.StatusText(status))
+	writeHeaders(&sb, header)
+	sb.WriteString("\r\n")
+	return sb.String()
+}
+
+// RequestHead reconstructs the HTTP request head ami sent, as text.
+func RequestHead(targetURI string, header http.Header) string {
 	var sb strings.Builder
 	sb.WriteString("GET ")
 	sb.WriteString(pathOf(targetURI))
 	sb.WriteString(" HTTP/1.1\r\n")
 	writeHeaders(&sb, header)
 	sb.WriteString("\r\n")
+	return sb.String()
+}
 
-	return warcEnvelope("request", targetURI, date, id, "application/http; msgtype=request", "", nil, []byte(sb.String()))
+// buildRequestRecord serializes a WARC request record reconstructed from the
+// request headers ami sent.
+func buildRequestRecord(targetURI string, header http.Header, date, id string) []byte {
+	return warcEnvelope("request", targetURI, date, id, "application/http; msgtype=request", "", nil, []byte(RequestHead(targetURI, header)))
 }
 
 // buildResponseRecord serializes a WARC response record with a reconstructed
 // HTTP status line, headers, and the captured body.
 func buildResponseRecord(targetURI string, status int, header http.Header, body []byte, date, id string) []byte {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "HTTP/1.1 %d %s\r\n", status, http.StatusText(status))
-	writeHeaders(&sb, header)
-	sb.WriteString("\r\n")
-
 	// Pass the reconstructed HTTP head and the body as separate parts so the
 	// envelope writes the body straight into its buffer once, instead of first
 	// concatenating head+body into a throwaway slice (a second copy of the body).
 	digest := payloadDigest(body)
-	return warcEnvelope("response", targetURI, date, id, "application/http; msgtype=response", digest, nil, []byte(sb.String()), body)
+	return warcEnvelope("response", targetURI, date, id, "application/http; msgtype=response", digest, nil, []byte(ResponseHead(status, header)), body)
 }
 
 // buildRevisitRecord serializes a WARC revisit record (server-not-modified

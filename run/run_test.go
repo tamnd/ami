@@ -36,6 +36,8 @@ type indexRow struct {
 	LastModified string `parquet:"last_modified"`
 	BodyLength   int64  `parquet:"body_length"`
 	Unchanged    bool   `parquet:"unchanged"`
+	Body         []byte `parquet:"body"`
+	RespHeaders  string `parquet:"resp_headers"`
 }
 
 func TestRunEndToEnd(t *testing.T) {
@@ -66,13 +68,15 @@ func TestRunEndToEnd(t *testing.T) {
 		t.Fatalf("want 3 OK, got %d (%+v)", final.OK, final)
 	}
 
-	// The WARC file should exist.
-	if _, err := os.Stat(filepath.Join(dir, "ami-00000.warc.gz")); err != nil {
-		t.Fatalf("warc missing: %v", err)
+	// The default format is the parquet body store: no WARC, and the bodies live
+	// inline in the capture rows.
+	if matches, _ := filepath.Glob(filepath.Join(dir, "*.warc.gz")); len(matches) != 0 {
+		t.Fatalf("parquet format should write no WARC, found %v", matches)
 	}
 
-	// The index should hold 3 rows, all status 200 with a digest.
-	rows := readIndex(t, filepath.Join(dir, "captures.parquet"))
+	// The index should hold 3 rows, all status 200 with a digest and an inline
+	// body the reader can rebuild from.
+	rows := readIndex(t, dir)
 	if len(rows) != 3 {
 		t.Fatalf("want 3 index rows, got %d", len(rows))
 	}
@@ -82,6 +86,48 @@ func TestRunEndToEnd(t *testing.T) {
 		}
 		if row.Digest == "" {
 			t.Errorf("row %s missing digest", row.URL)
+		}
+		if len(row.Body) == 0 {
+			t.Errorf("row %s missing inline body", row.URL)
+		}
+		if row.RespHeaders == "" {
+			t.Errorf("row %s missing reconstructed response head", row.URL)
+		}
+	}
+}
+
+// TestRunWARCFormat covers the opt-in warc format: bodies go to WARC files and
+// the capture rows point at them instead of carrying the body inline.
+func TestRunWARCFormat(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = fmt.Fprintf(w, "body for %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.OutDir = dir
+	cfg.Workers = 4
+	cfg.Format = "warc"
+
+	r := New(cfg)
+	if err := r.Run(context.Background(), sliceSource{[]seed.Seed{
+		{URL: srv.URL + "/a"}, {URL: srv.URL + "/b"}, {URL: srv.URL + "/c"},
+	}}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "ami-00000.warc.gz")); err != nil {
+		t.Fatalf("warc missing: %v", err)
+	}
+	rows := readIndex(t, dir)
+	if len(rows) != 3 {
+		t.Fatalf("want 3 index rows, got %d", len(rows))
+	}
+	for _, row := range rows {
+		if len(row.Body) != 0 {
+			t.Errorf("row %s should not carry an inline body in warc format", row.URL)
 		}
 	}
 }
@@ -101,7 +147,7 @@ func TestRunUnchanged(t *testing.T) {
 	if err := r1.Run(context.Background(), sliceSource{[]seed.Seed{{URL: srv.URL}}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	digest := readIndex(t, filepath.Join(dir1, "captures.parquet"))[0].Digest
+	digest := readIndex(t, dir1)[0].Digest
 
 	// Second pass with the digest seeded should report unchanged.
 	dir2 := t.TempDir()
@@ -143,7 +189,7 @@ func TestRunConditional304(t *testing.T) {
 	if err := r1.Run(context.Background(), sliceSource{[]seed.Seed{{URL: srv.URL}}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	first := readIndex(t, filepath.Join(dir1, "captures.parquet"))[0]
+	first := readIndex(t, dir1)[0]
 	if first.ETag != etag {
 		t.Fatalf("first pass did not record etag: got %q", first.ETag)
 	}
@@ -162,7 +208,7 @@ func TestRunConditional304(t *testing.T) {
 	if got := r2.Stats().Snapshot().NotMod; got != 1 {
 		t.Fatalf("want 1 unchanged from a 304, got %d", got)
 	}
-	row := readIndex(t, filepath.Join(dir2, "captures.parquet"))[0]
+	row := readIndex(t, dir2)[0]
 	if row.Status != http.StatusNotModified {
 		t.Errorf("want status 304, got %d", row.Status)
 	}
@@ -174,21 +220,25 @@ func TestRunConditional304(t *testing.T) {
 	}
 }
 
-func readIndex(t *testing.T, path string) []indexRow {
+// readIndex reads every rotated capture file under dir and returns the rows in
+// file order, so a test can assert against a run regardless of how many files it
+// rotated into.
+func readIndex(t *testing.T, dir string) []indexRow {
 	t.Helper()
-	f, err := os.Open(path)
+	files, err := filepath.Glob(filepath.Join(dir, "captures-*.parquet"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = f.Close() }()
-	info, _ := f.Stat()
-	pf, err := parquet.OpenFile(f, info.Size())
-	if err != nil {
-		t.Fatal(err)
+	if len(files) == 0 {
+		t.Fatalf("no capture files under %s", dir)
 	}
-	reader := parquet.NewGenericReader[indexRow](pf)
-	defer func() { _ = reader.Close() }()
-	rows := make([]indexRow, pf.NumRows())
-	n, _ := reader.Read(rows)
-	return rows[:n]
+	var all []indexRow
+	for _, path := range files {
+		rows, err := parquet.ReadFile[indexRow](path)
+		if err != nil {
+			t.Fatalf("ReadFile %s: %v", path, err)
+		}
+		all = append(all, rows...)
+	}
+	return all
 }
