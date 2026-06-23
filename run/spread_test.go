@@ -153,14 +153,19 @@ func TestFeedReorderSpreadsClusteredSeed(t *testing.T) {
 	if int(r.stats.Seeded.Load()) != len(in) {
 		t.Fatalf("Seeded = %d, want %d", r.stats.Seeded.Load(), len(in))
 	}
-	// First four emitted seeds should span all four hosts with a buffered feed.
-	seen := map[string]bool{}
-	for _, s := range got[:len(hosts)] {
-		seen[urlx.Host(s.URL)] = true
-	}
-	if len(seen) != len(hosts) {
-		t.Fatalf("first %d feed emissions covered %d hosts, want %d: %v",
-			len(hosts), len(seen), len(hosts), urls(got))
+	// feed's deterministic contract through the reorder path is that it passes
+	// every seed through exactly once and counts each as seeded. The interleave
+	// itself depends on how far the producer fills ahead of the drainer, a race
+	// against scheduling, so it is asserted deterministically against the
+	// spreader directly in TestHostSpreaderInterleavesHosts rather than here.
+	wantSet := urls(in)
+	gotSet := urls(got)
+	sort.Strings(wantSet)
+	sort.Strings(gotSet)
+	for i := range wantSet {
+		if wantSet[i] != gotSet[i] {
+			t.Fatalf("set mismatch at %d: got %q want %q", i, gotSet[i], wantSet[i])
+		}
 	}
 }
 
