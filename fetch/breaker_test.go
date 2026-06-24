@@ -75,7 +75,7 @@ func TestConnectButSilentDomainDies(t *testing.T) {
 
 	to := &timeoutErr{}
 	for i := 0; i < cfg.DomainFailThreshold; i++ {
-		f.attribute(dom, to)
+		_ = f.attribute(dom, to)
 	}
 	if !f.domainDead(dom) {
 		t.Fatal("a connect-but-silent host was never skipped despite repeated timeouts")
