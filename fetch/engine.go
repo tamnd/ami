@@ -90,11 +90,11 @@ type domainState struct {
 
 // New builds a Fetcher from config.
 func New(cfg config.Config) *Fetcher {
-	res := newResolver(cfg.DNSTimeout)
+	res := newResolver(cfg.DNSTimeout, cfg.DNSWorkers)
 	f := &Fetcher{
 		cfg:     cfg,
 		res:     res,
-		timeout: newAdaptiveTimeout(cfg.Timeout),
+		timeout: newAdaptiveTimeout(cfg.Timeout, cfg.TimeoutFloor),
 		lim:     newLimiter(cfg.MinInflight, cfg.StartInflight, cfg.Workers),
 		maxBody: cfg.MaxBodyBytes,
 	}
@@ -144,13 +144,20 @@ func (f *Fetcher) newTransport(res *resolver) *http.Transport {
 		},
 		// InsecureSkipVerify avoids cgo cert-verification thread exhaustion at
 		// high concurrency; ami archives bytes, it does not authenticate peers.
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
-		ForceAttemptHTTP2:     false,
-		DisableCompression:    true,
-		MaxIdleConns:          0,
-		MaxIdleConnsPerHost:   50,
-		IdleConnTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:   f.cfg.ProbeTimeout,
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+		ForceAttemptHTTP2:   false,
+		DisableCompression:  true,
+		MaxIdleConns:        0,
+		MaxIdleConnsPerHost: 50,
+		IdleConnTimeout:     30 * time.Second,
+		TLSHandshakeTimeout: f.cfg.ProbeTimeout,
+		// ResponseHeaderTimeout abandons a host that has connected but not sent
+		// response headers in time, which is the dominant dead-host cost on a raw
+		// crawl: a host that accepts the TCP connection then blackholes the request
+		// pays only this instead of the full request deadline. A host already
+		// streaming a body is unaffected, its headers having arrived. Zero leaves
+		// it off, falling back to the request context deadline.
+		ResponseHeaderTimeout: f.cfg.HeaderTimeout,
 		ExpectContinueTimeout: time.Second,
 		WriteBufferSize:       8 * 1024,
 		ReadBufferSize:        16 * 1024,
@@ -305,11 +312,18 @@ func (f *Fetcher) Fetch(ctx context.Context, s SeedURL) Result {
 		return r
 	}
 
-	// Gate on the adaptive in-flight limit before taking any connection, so a
-	// thin uplink is never asked to open more sockets than it sustains. This is
-	// what keeps the link out of the congestion collapse that would otherwise
-	// time out live hosts and trip the breaker.
-	if !f.lim.acquire(ctx) {
+	// Take the per-host slot first, then the in-flight limiter slot. The order
+	// matters: a raw shard arrives host-clustered, so many workers contend for a
+	// single host's slots at once, and if the limiter slot were taken first every
+	// one of those workers would hold a slice of the global in-flight budget while
+	// parked on the host semaphore, doing nothing on the wire. The limiter would
+	// then read the link as saturated when almost nothing is in flight, and the
+	// effective concurrency would collapse far below the configured limit. By
+	// gating on the host first, a limiter slot is only ever held by a request that
+	// is actually about to open a connection, so inflight reflects real link load
+	// and the AIMD controller climbs to the link's true capacity.
+	release, ok := f.acquireHost(ctx, host)
+	if !ok {
 		r.Err = ctx.Err()
 		if r.Err == nil {
 			r.Err = errSkip
@@ -317,10 +331,16 @@ func (f *Fetcher) Fetch(ctx context.Context, s SeedURL) Result {
 		return r
 	}
 
-	release, ok := f.acquireHost(ctx, host)
-	if !ok {
-		f.lim.release(outNeutral)
+	// Gate on the adaptive in-flight limit before taking any connection, so a
+	// thin uplink is never asked to open more sockets than it sustains. This is
+	// what keeps the link out of the congestion collapse that would otherwise
+	// time out live hosts and trip the breaker.
+	if !f.lim.acquire(ctx) {
+		release()
 		r.Err = ctx.Err()
+		if r.Err == nil {
+			r.Err = errSkip
+		}
 		return r
 	}
 

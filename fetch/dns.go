@@ -22,6 +22,14 @@ type resolver struct {
 	timeout   time.Duration
 	resolvers []*net.Resolver
 
+	// sem bounds how many lookups open DNS sockets at once. A cache or
+	// negative-cache hit never touches it, so the bound applies only to genuine
+	// misses, which are the lookups that actually open UDP sockets. Without it a
+	// high worker count can open a DNS socket per concurrent miss, and those
+	// sockets compete with the HTTP connections for the process file-descriptor
+	// budget and the kernel's ephemeral-port range. A nil sem means unbounded.
+	sem chan struct{}
+
 	mu    sync.RWMutex
 	cache map[string][]net.IP
 	dead  map[string]struct{}
@@ -32,7 +40,11 @@ type resolver struct {
 // one racer among several rather than the first one tried, so the local stub's
 // rate cap and load-shedding cannot bound the crawl; the public resolvers
 // answer in parallel and the fastest correct reply is taken.
-func newResolver(timeout time.Duration) *resolver {
+func newResolver(timeout time.Duration, maxConcurrent int) *resolver {
+	var sem chan struct{}
+	if maxConcurrent > 0 {
+		sem = make(chan struct{}, maxConcurrent)
+	}
 	return &resolver{
 		timeout: timeout,
 		resolvers: []*net.Resolver{
@@ -41,6 +53,7 @@ func newResolver(timeout time.Duration) *resolver {
 			udpResolver("1.1.1.1:53"),
 			udpResolver("9.9.9.9:53"),
 		},
+		sem:   sem,
 		cache: make(map[string][]net.IP),
 		dead:  make(map[string]struct{}),
 	}
@@ -75,6 +88,17 @@ func (r *resolver) lookup(ctx context.Context, host string) ([]net.IP, bool) {
 		return ips, true
 	}
 	r.mu.RUnlock()
+
+	// Bound the number of in-flight lookups that open sockets. Acquire only for
+	// the miss path, and give up cleanly if the run is cancelled while parked.
+	if r.sem != nil {
+		select {
+		case r.sem <- struct{}{}:
+			defer func() { <-r.sem }()
+		case <-ctx.Done():
+			return nil, false
+		}
+	}
 
 	ips, nxdomain := r.race(ctx, host)
 	if len(ips) > 0 {

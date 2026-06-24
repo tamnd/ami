@@ -35,14 +35,25 @@ type adaptiveTimeout struct {
 	current atomic.Int64 // nanoseconds
 }
 
-// newAdaptiveTimeout returns a timeout seeded at the ceiling. The floor is high
-// enough that a host which is merely slow to connect or answer (a distant
-// government or university server can take two to three seconds to complete a
-// TLS handshake) is given time to respond rather than aborted and recorded as a
-// failure. A fast host never reaches the floor, so this costs nothing on a
-// healthy run; it only widens the window for the slow tail.
-func newAdaptiveTimeout(ceiling time.Duration) *adaptiveTimeout {
-	a := &adaptiveTimeout{ceiling: ceiling, floor: 3 * time.Second}
+// defaultTimeoutFloor is the adaptive timeout's lower clamp when the caller does
+// not set one. It is high enough that a host which is merely slow to connect or
+// answer (a distant government or university server can take two to three
+// seconds to complete a TLS handshake) is given time to respond rather than
+// aborted and recorded as a failure. A fast host never reaches the floor, so it
+// costs nothing on a healthy run; it only widens the window for the slow tail.
+const defaultTimeoutFloor = 3 * time.Second
+
+// newAdaptiveTimeout returns a timeout seeded at the ceiling and clamped below
+// by floor. A zero floor selects defaultTimeoutFloor. A floor at or above the
+// ceiling pins the timeout at the ceiling, which is how a caller that wants a
+// fixed short deadline (a dead-host-heavy crawl that values proving a host dead
+// fast over waiting on the slow tail) gets one: set the ceiling tight and leave
+// the floor at its default.
+func newAdaptiveTimeout(ceiling, floor time.Duration) *adaptiveTimeout {
+	if floor <= 0 {
+		floor = defaultTimeoutFloor
+	}
+	a := &adaptiveTimeout{ceiling: ceiling, floor: floor}
 	a.current.Store(int64(ceiling))
 	return a
 }
