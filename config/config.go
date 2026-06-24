@@ -41,6 +41,24 @@ type Config struct {
 	ProbeTimeout time.Duration
 	DNSTimeout   time.Duration
 
+	// HeaderTimeout caps how long to wait for a server's response headers after
+	// the request has been written, separate from Timeout which bounds the whole
+	// exchange including the body read. It is the lever for the dominant dead-host
+	// cost on a raw crawl: a host that accepts the TCP connection then goes silent
+	// pays only HeaderTimeout instead of the full request deadline, while a
+	// slow-but-live host that has started streaming a body is unaffected because
+	// its headers already arrived. Set it above the slowest first-byte latency you
+	// are willing to wait for (a distant government or university server can take
+	// two to three seconds) and below Timeout. Zero disables it, falling back to
+	// Timeout for the whole exchange.
+	HeaderTimeout time.Duration
+
+	// TimeoutFloor is the lower clamp on the adaptive request timeout. The
+	// adaptive timeout serves roughly P95 latency times two, and never drops
+	// below this floor, so a fast run does not abort a host that is merely slow to
+	// connect or answer. Zero selects the engine default.
+	TimeoutFloor time.Duration
+
 	// Politeness.
 	MaxConnsPerHost     int
 	MaxConnsPerIP       int

@@ -43,23 +43,42 @@ func TestAnsweredDomainNeverDies(t *testing.T) {
 	}
 }
 
-// TestReachableDomainNeverDies checks that a domain we have merely connected to,
-// even without a completed response, is immune to the breaker. This is the
-// property the resolver-socket reachability bug violated: marking reachability
-// from the wrong signal silently immunised every domain; marking it from no
-// signal would let a slow-but-connectable host be skipped.
-func TestReachableDomainNeverDies(t *testing.T) {
+// TestRespondedDomainNeverDies checks that a domain that has sent us its first
+// response byte, even without a completed body, is immune to the breaker. A host
+// that puts bytes on the wire is alive but slow, not dead, so it must never be
+// skipped over later body-stall timeouts.
+func TestRespondedDomainNeverDies(t *testing.T) {
 	cfg := config.Default()
 	cfg.DomainFailThreshold = 3
 	f := New(cfg)
-	const dom = "reachable.example"
+	const dom = "slow-body.example"
 
-	f.noteDomainReachable(dom)
+	f.noteDomainResponded(dom)
 	for range cfg.DomainFailThreshold + 5 {
 		f.noteDomainFail(dom)
 	}
 	if f.domainDead(dom) {
-		t.Fatal("a domain we connected to was skipped over later failures")
+		t.Fatal("a domain that sent a response byte was skipped over later failures")
+	}
+}
+
+// TestConnectButSilentDomainDies checks the property that the TCP-reachability
+// immunization used to violate: a host that accepts the connection then never
+// sends a byte (the dominant dead-host mode on a stale shard) must trip the
+// breaker so its remaining URLs are skipped instead of each re-paying the header
+// deadline. attribute counts an uncongested timeout on a never-responded domain.
+func TestConnectButSilentDomainDies(t *testing.T) {
+	cfg := config.Default()
+	cfg.DomainFailThreshold = 2
+	f := New(cfg)
+	const dom = "silent.example"
+
+	to := &timeoutErr{}
+	for i := 0; i < cfg.DomainFailThreshold; i++ {
+		_ = f.attribute(dom, to)
+	}
+	if !f.domainDead(dom) {
+		t.Fatal("a connect-but-silent host was never skipped despite repeated timeouts")
 	}
 }
 
