@@ -79,13 +79,17 @@ type domainState struct {
 	// wasting workers on hosts that will never answer, not on live-but-slow
 	// ones, so a single success immunizes it for the rest of the run.
 	alive atomic.Bool
-	// reachable is set once we have ever established a TCP connection to the
-	// domain, even if that exchange then timed out or failed before a response.
-	// A host we have connected to is by definition not dead, so it is never
-	// skipped: this catches a host that accepts connections but is too slow to
-	// answer within the request deadline, which a response timeout alone would
-	// otherwise look like silence.
-	reachable atomic.Bool
+	// responded is set once a domain has sent us its first response byte, even
+	// if the body then stalled and the exchange timed out. A host that has put
+	// bytes on the wire is alive, not dead, so it is never skipped: this catches
+	// a host that answers slowly. TCP reachability alone is deliberately NOT
+	// enough to immunize a domain. On a stale shard the dominant dead-host mode
+	// is connect-but-silent: parked domains, default vhosts, and load balancers
+	// that accept the TCP connection (and even the TLS handshake) then blackhole
+	// the request and never send a header. Immunizing on connect would re-pay the
+	// header deadline for every URL on such a host for the whole run, so only a
+	// real response byte counts as life.
+	responded atomic.Bool
 }
 
 // New builds a Fetcher from config.
@@ -187,18 +191,18 @@ func (f *Fetcher) acquireHost(ctx context.Context, host string) (func(), bool) {
 
 // domainDead reports whether a domain has exceeded the failure threshold and
 // should be skipped for the rest of the run. A domain that has ever answered or
-// that we have ever connected to is never dead: a single success or a single
-// established connection immunizes it, so a live-but-slow host is never skipped
-// over a run of transient timeouts, and only failures that prove the host
-// genuinely cannot be reached (its name does not resolve, or there is no route)
-// ever count toward the threshold in the first place.
+// ever put a response byte on the wire is never dead: a single success or first
+// byte immunizes it, so a live-but-slow host is never skipped over a run of
+// transient timeouts. A genuine failure (a name that does not resolve, no route)
+// counts, and so does a timeout on a host that has never sent us a byte while
+// the link is uncongested, which is the connect-but-silent dead-host signature.
 func (f *Fetcher) domainDead(domain string) bool {
 	v, ok := f.deadDom.Load(domain)
 	if !ok {
 		return false
 	}
 	st := v.(*domainState)
-	if st.alive.Load() || st.reachable.Load() {
+	if st.alive.Load() || st.responded.Load() {
 		return false
 	}
 	return st.fails.Load() >= int64(f.cfg.DomainFailThreshold)
@@ -220,16 +224,27 @@ func (f *Fetcher) noteDomainOK(domain string) {
 	}
 }
 
-// noteDomainReachable records that we established a TCP connection to a domain,
-// immunizing it from the breaker even if the request that opened the connection
-// then timed out. A host that accepts connections is reachable, not dead, so it
-// must never be skipped.
-func (f *Fetcher) noteDomainReachable(domain string) {
+// noteDomainResponded records that a domain sent us its first response byte,
+// immunizing it from the breaker even if the body then stalled and the exchange
+// timed out. A host that has put bytes on the wire is alive, not dead, so it
+// must never be skipped. TCP reachability alone does not qualify: a connect-but-
+// silent host has sent nothing and stays subject to the breaker.
+func (f *Fetcher) noteDomainResponded(domain string) {
 	v, _ := f.deadDom.LoadOrStore(domain, &domainState{})
 	st := v.(*domainState)
-	if st.reachable.CompareAndSwap(false, true) {
+	if st.responded.CompareAndSwap(false, true) {
 		st.fails.Store(0)
 	}
+}
+
+// domainResponded reports whether a domain has ever answered or sent a first
+// response byte, the two signals that immunize it from the breaker.
+func (f *Fetcher) domainResponded(domain string) bool {
+	if v, ok := f.deadDom.Load(domain); ok {
+		st := v.(*domainState)
+		return st.alive.Load() || st.responded.Load()
+	}
+	return false
 }
 
 // Stop releases the engine's blocking limiter so a cancelled run unwinds. It is
@@ -240,12 +255,17 @@ func (f *Fetcher) Stop() { f.lim.close() }
 func (f *Fetcher) Limit() int { return f.lim.currentLimit() }
 
 // attribute decides what a transport error means for the dead-domain breaker.
-// Only a genuine failure (a name that does not resolve, or a host with no
-// network route) counts toward a domain's death, because only those prove the
-// host cannot be reached at all. A transient failure (a timeout, a reset, a
-// refused connection, a TLS error) never counts: it is retried as errRetry
-// while the link is congested, and otherwise recorded as an honest failure, so
-// a live-but-slow, resetting, or backlog-refusing host is never skipped.
+// A genuine failure (a name that does not resolve, or a host with no network
+// route) always counts toward a domain's death. A transient failure (a timeout,
+// a reset, a refused connection, a TLS error) is retried as errRetry while the
+// link is congested, so our own congestion collapse never trips the breaker on
+// live hosts. When the link is NOT congested, a timeout on a host that has never
+// sent us a single response byte is the connect-but-silent signature: the host
+// accepts the connection then blackholes the request. On a stale shard these
+// dominate, so that timeout counts toward the breaker, and after the threshold
+// the host's remaining URLs are skipped instead of each re-paying the header
+// deadline. A host that has ever answered is immune, so a live-but-slow host is
+// never skipped.
 func (f *Fetcher) attribute(domain string, err error) error {
 	switch classify(err) {
 	case classCanceled:
@@ -256,6 +276,9 @@ func (f *Fetcher) attribute(domain string, err error) error {
 	default: // classTransient
 		if f.lim.congested() {
 			return errRetry
+		}
+		if isTimeoutErr(err) && !f.domainResponded(domain) {
+			f.noteDomainFail(domain)
 		}
 		return err
 	}
@@ -347,26 +370,18 @@ func (f *Fetcher) Fetch(ctx context.Context, s SeedURL) Result {
 	to := f.timeout.value()
 	reqCtx, cancel := context.WithTimeout(ctx, to)
 
-	// Mark the domain reachable the moment we have a connection to the host
-	// itself, so a host we can reach is never skipped even if the request that
-	// opened the connection later times out. Both hooks are request-scoped: they
-	// fire only for the connection the HTTP round trip uses, never for the UDP
-	// sockets our pure-Go resolver opens to its DNS servers (those would
-	// otherwise look like a successful connect to every domain, including ones
-	// that do not resolve, and silently disable the dead-domain breaker).
-	// GotConn covers a freshly dialed or pooled connection; TLSHandshakeStart
-	// additionally covers an https host whose TCP connects but whose TLS
-	// handshake is too slow to finish within the deadline.
+	// Immunize the domain the moment it sends us its first response byte, so a
+	// host that answers slowly is never skipped even if the body then stalls and
+	// times out. This is request-scoped and fires only for bytes the host
+	// actually puts on the wire, so it cannot be tricked by a TCP connect or TLS
+	// handshake to a connect-but-silent host, nor by the UDP sockets our pure-Go
+	// resolver opens to its DNS servers. Recording first byte here is what keeps
+	// the breaker aimed only at hosts that never answer.
 	var ttfbOnce sync.Once
 	var ttfbAt time.Time
 	reqCtx = httptrace.WithClientTrace(reqCtx, &httptrace.ClientTrace{
-		GotConn: func(httptrace.GotConnInfo) {
-			f.noteDomainReachable(domain)
-		},
-		TLSHandshakeStart: func() {
-			f.noteDomainReachable(domain)
-		},
 		GotFirstResponseByte: func() {
+			f.noteDomainResponded(domain)
 			ttfbOnce.Do(func() { ttfbAt = time.Now() })
 		},
 		ConnectDone: func(network, addr string, err error) {
